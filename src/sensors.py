@@ -14,8 +14,7 @@
      各传感器的预热时长在 config.py 里配置。
 
   3. 周期采集
-     I2C 总线上三个传感器共用一个 1 秒周期(SGP40 的 VOC 算法必须按 1s 喂数);
-     SCD40 内部每 5 秒出一次结果, 用 data_ready 查询后按需读取;
+     I2C 总线上两个传感器共用一个 1 秒周期(SGP40 的 VOC 算法必须按 1s 喂数);
      ZE08 用独立的 100ms 任务刷串口缓冲, 防止 UART 接收缓冲溢出丢帧。
 
   4. 热插拔 —— 运行中定时重新探测
@@ -30,7 +29,6 @@ from machine import Pin, I2C
 import config as cfg
 import sht40
 import sgp40
-import scd40
 import ze08
 import voc
 
@@ -47,6 +45,10 @@ class Channel:
         self.warmup_s = warmup_s
         self.enabled = enabled
         self.state = ST_PROBE if enabled else ST_ABSENT
+        # 开机首次检测是否已经"有结论"。
+        # 注意不能直接用 state == ST_PROBE 来判断: 热插拔重扫时 ZE08 会
+        # 周期性地回到 ST_PROBE, 那样这个标记会跟着抖。
+        self.resolved = not enabled
         self.warm_end = 0
         self.learn_end = 0
         self.probe_start = 0
@@ -57,6 +59,7 @@ class Channel:
 
     def begin_warmup(self, now):
         self.state = ST_WARMUP
+        self.resolved = True
         self.warm_end = now + self.warmup_s * 1000
         self.learn_end = now + cfg.VOC_LEARN_S * 1000
         self.fails = 0
@@ -64,21 +67,32 @@ class Channel:
 
     def drop(self, now, state=ST_ABSENT):
         self.state = state
+        self.resolved = True
         self.next_probe = now + cfg.RESCAN_MS
         self.fails = 0
         self.probe_start = now
         self.asked = False
 
     def snapshot(self, now):
+        state = self.state
+        # 已经有结论之后又短暂回到 ST_PROBE, 那是热插拔后台重扫
+        # (ZE08 每 RESCAN_MS 会试一次)。界面上保持上次的结论,
+        # 否则屏幕每 10 秒就闪一下"自检中"。
+        if self.resolved and state == ST_PROBE:
+            state = ST_ABSENT
         d = {
-            "state": self.state,
+            "state": state,
+            "enabled": self.enabled,
             "name": self.name,
             "addr": self.addr_str,
-            "learning": (self.state == ST_READY
+            # 只有 SGP40 有"学习基线"这回事; 其它传感器如果也置 true,
+            # 界面上会一直显示 ~ 并且把报警星号盖掉。
+            "learning": (state == ST_READY
+                         and self.key == "sgp40"
                          and ticks_diff(self.learn_end, now) > 0),
             "warm_left": 0,
         }
-        if self.state == ST_WARMUP:
+        if state == ST_WARMUP:
             left = ticks_diff(self.warm_end, now) // 1000
             d["warm_left"] = left if left > 0 else 0
         return d
@@ -144,8 +158,6 @@ class SensorManager:
                              cfg.SHT40_ENABLED),
             "sgp40": Channel("sgp40", "SGP40", "0x59", cfg.WARMUP_SGP40,
                              cfg.SGP40_ENABLED),
-            "scd40": Channel("scd40", "SCD40", "0x62", cfg.WARMUP_SCD40,
-                             cfg.SCD40_ENABLED),
             "ze08": Channel("ze08", "ZE08", "UART", cfg.WARMUP_ZE08,
                             cfg.ZE08_ENABLED),
         }
@@ -153,9 +165,9 @@ class SensorManager:
         self.values = {
             "temp": None, "rh": None,
             "hcho_ppb": None, "hcho_mg": None,
-            "tvoc": None, "co2": None,
+            "tvoc": None,
         }
-        self.alarm = {"sht40": False, "ze08": False, "sgp40": False, "scd40": False}
+        self.alarm = {"sht40": False, "ze08": False, "sgp40": False}
         self.info = {
             "voc_raw": 0, "voc_learning": False, "voc_uptime": 0,
             "ze08_frames": 0, "ze08_bad": 0, "scan": "",
@@ -164,13 +176,10 @@ class SensorManager:
         # 驱动实例
         self.drv_sht = None
         self.drv_sgp = None
-        self.drv_scd = None
         self.drv_ze08 = None
-        self.scd_async = None
         self.algo = voc.VocAlgorithm()
 
         self._sgp_learn_ms = 0
-        self._scd_last_ok = 0
 
     # ==================== 总线扫描 ====================
     def _scan_once(self):
@@ -191,7 +200,7 @@ class SensorManager:
         都扫不到东西 —— 这时光重新扫描是没用的, 必须先用普通 GPIO 把总线顶回
         空闲状态, 再重新创建 I2C 对象(MicroPython 的 I2C 不支持原地 init)。
         """
-        for key in ("sht40", "sgp40", "scd40"):
+        for key in ("sht40", "sgp40"):
             self._forget(key)
         try:
             self.i2c.deinit()
@@ -234,8 +243,7 @@ class SensorManager:
 
         # 已在线但地址消失 => 掉线
         for key, addr in (("sht40", cfg.SHT40_ADDR),
-                          ("sgp40", cfg.SGP40_ADDR),
-                          ("scd40", cfg.SCD40_ADDR)):
+                          ("sgp40", cfg.SGP40_ADDR)):
             ch = self.ch[key]
             if ch.enabled and ch.state in (ST_READY, ST_WARMUP) \
                     and addr not in self.scan_addrs:
@@ -252,10 +260,6 @@ class SensorManager:
         elif key == "sgp40":
             self.drv_sgp = None
             self.values["tvoc"] = None
-        elif key == "scd40":
-            self.drv_scd = None
-            self.scd_async = None
-            self.values["co2"] = None
         elif key == "ze08":
             self.drv_ze08 = None
             self.values["hcho_ppb"] = None
@@ -276,7 +280,7 @@ class SensorManager:
         if not ch.enabled:
             return
 
-        if ch.state in (ST_ABSENT, ST_FAULT):
+        if ch.state in (ST_PROBE, ST_ABSENT, ST_FAULT):
             if ticks_diff(now, ch.next_probe) < 0:
                 return
             if cfg.SHT40_ADDR not in self.scan_addrs:
@@ -313,7 +317,7 @@ class SensorManager:
         if not ch.enabled:
             return
 
-        if ch.state in (ST_ABSENT, ST_FAULT):
+        if ch.state in (ST_PROBE, ST_ABSENT, ST_FAULT):
             if ticks_diff(now, ch.next_probe) < 0:
                 return
             if cfg.SGP40_ADDR not in self.scan_addrs:
@@ -354,60 +358,6 @@ class SensorManager:
         self.info["voc_uptime"] = int(self.algo.mUptime)
         self.info["voc_learning"] = (
             ch.state == ST_READY and ticks_diff(ch.learn_end, now) > 0)
-
-    # ==================== SCD40 ====================
-    def _step_scd40(self, now):
-        ch = self.ch["scd40"]
-        if not ch.enabled:
-            return
-
-        if ch.state in (ST_ABSENT, ST_FAULT):
-            if ticks_diff(now, ch.next_probe) < 0:
-                return
-            if cfg.SCD40_ADDR not in self.scan_addrs:
-                ch.drop(now, ST_ABSENT)
-                return
-            try:
-                d = scd40.SCD40(self.i2c, cfg.SCD40_ADDR)
-                d.serial_number()               # 功能探测
-                d.start_periodic_measurement()
-            except OSError as e:
-                ch.drop(now, ST_FAULT)
-                ch.error = str(e)
-                return
-            self.drv_scd = d
-            self.scd_async = scd40.SCD40Async(d, min_interval_ms=4800)
-            self._scd_last_ok = now
-            ch.begin_warmup(now)
-            print("[SCD40] 已连接, 预热 %ds" % ch.warmup_s)
-
-        if ch.state == ST_WARMUP and ticks_diff(now, ch.warm_end) >= 0:
-            ch.state = ST_READY
-            print("[SCD40] 预热完成")
-
-        if self.scd_async is None:
-            return
-
-        try:
-            res = self.scd_async.poll()
-        except OSError as e:
-            self._i2c_fail("scd40", e)
-            return
-
-        if res is not None:
-            self.values["co2"] = res[0]
-            self._scd_last_ok = now
-            ch.fails = 0
-            if self.values["temp"] is None:
-                # 没有 SHT40 时, 用 SCD40 自带的温湿度兜底
-                self.values["temp"] = res[1]
-                self.values["rh"] = res[2]
-
-        # 30 秒没有任何新数据 => 认为掉线
-        elif ch.state == ST_READY and ticks_diff(now, self._scd_last_ok) > 30000:
-            print("[SCD40] 30s 无数据, 视为掉线")
-            self._forget("scd40")
-            self.ch["scd40"].drop(now, ST_FAULT)
 
     # ==================== ZE08 ====================
     def _step_ze08(self):
@@ -474,12 +424,14 @@ class SensorManager:
                      and v["hcho_mg"] is not None and v["hcho_mg"] >= cfg.HCHO_ALARM)
         a["sgp40"] = (self.ch["sgp40"].state == ST_READY
                       and v["tvoc"] is not None and v["tvoc"] >= cfg.TVOC_ALARM)
-        a["scd40"] = (self.ch["scd40"].state == ST_READY
-                      and v["co2"] is not None and v["co2"] >= cfg.CO2_ALARM)
         a["sht40"] = False
         return a
 
     def any_alarm(self):
+        # 注意: 这里必须自己先算一遍。
+        # snapshot() 只在屏幕正常时才会被调用, 如果 OLED 没接上,
+        # 光靠 snapshot() 更新 alarm 的话, 报警灯/蜂鸣器就永远不会动。
+        self._eval_alarm()
         return any(self.alarm.values())
 
     # ==================== 快照 ====================
@@ -498,15 +450,3 @@ class SensorManager:
             "alarm": self.alarm,
             "info": self.info,
         }
-
-    def selftest_rows(self):
-        """自检页要显示的行: [(名称, 状态), ...]"""
-        return [(self.ch[k].name, self.ch[k].state)
-                for k in ("sht40", "sgp40", "scd40", "ze08")]
-
-    def all_resolved(self):
-        """是否所有通道都已经有结论(不再是"检测中")。"""
-        for ch in self.ch.values():
-            if ch.enabled and ch.state == ST_PROBE:
-                return False
-        return True

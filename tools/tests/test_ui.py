@@ -42,16 +42,18 @@ def dump(oled, title):
     print("+" + "-" * oled.width + "+")
 
 
-def chan(state, warm_left=0, learning=False):
+def chan(state, warm_left=0, learning=False, enabled=True):
     return {"state": state, "name": "X", "addr": "", "learning": learning,
-            "warm_left": warm_left}
+            "warm_left": warm_left, "enabled": enabled}
 
 
 def snapshot(states, values, alarm=None, uptime=12 * 60 + 34, oled_ok=True):
+    en = {"sht40": cfg.SHT40_ENABLED, "sgp40": cfg.SGP40_ENABLED,
+          "ze08": cfg.ZE08_ENABLED}
     channels = {}
-    for k in ("sht40", "ze08", "sgp40", "scd40"):
-        channels[k] = chan(states.get(k, ui.ST_READY))
-    a = {"sht40": False, "ze08": False, "sgp40": False, "scd40": False}
+    for k in ("sht40", "ze08", "sgp40"):
+        channels[k] = chan(states.get(k, ui.ST_READY), enabled=en[k])
+    a = {"sht40": False, "ze08": False, "sgp40": False}
     if alarm:
         a.update(alarm)
     return {
@@ -63,12 +65,12 @@ def snapshot(states, values, alarm=None, uptime=12 * 60 + 34, oled_ok=True):
         "alarm": a,
         "info": {"voc_raw": 32145, "voc_learning": True, "voc_uptime": 120,
                  "ze08_frames": 121, "ze08_bad": 3,
-                 "scan": "3C 44 59 62"},
+                 "scan": "3C 44 59"},
     }
 
 
 FULL = {"temp": 25.4, "rh": 48.2, "hcho_ppb": 32, "hcho_mg": 0.04,
-        "tvoc": 123, "co2": 612}
+        "tvoc": 123}
 
 oled = FakeOLED(cfg.OLED_WIDTH, cfg.OLED_HEIGHT)
 u = ui.UI(oled, cfg.VERSION)
@@ -76,18 +78,6 @@ u = ui.UI(oled, cfg.VERSION)
 # ---------------------------------------------------------------- 开机画面
 u.splash()
 dump(oled, "开机画面")
-
-# ---------------------------------------------------------------- 自检
-mix = {
-    "sht40": ui.ST_READY,
-    "sgp40": ui.ST_PROBE,
-    "scd40": ui.ST_ABSENT,
-    "ze08": ui.ST_ABSENT,
-}
-rows = [("SHT40", mix["sht40"]), ("SGP40", mix["sgp40"]),
-        ("SCD40", mix["scd40"]), ("ZE08", mix["ze08"])]
-u.show_selftest(rows)
-dump(oled, "传感器自检 (2 个未连接, 1 个检测中)")
 
 # ---------------------------------------------------------------- 主界面 全部正常
 u.show_main(snapshot({}, FULL))
@@ -97,25 +87,23 @@ dump(oled, "第 1 页 主界面 - 全部就绪")
 warm = {
     "sht40": ui.ST_READY,
     "sgp40": ui.ST_WARMUP,
-    "scd40": ui.ST_WARMUP,
     "ze08": ui.ST_ABSENT,
 }
 v = dict(FULL)
 v["hcho_ppb"] = None
 v["hcho_mg"] = None
 v["tvoc"] = None
-v["co2"] = None
 s = snapshot(warm, v)
-s["channels"]["sgp40"] = chan(ui.ST_WARMUP, warm_left=47)
-s["channels"]["scd40"] = chan(ui.ST_WARMUP, warm_left=132)
+s["channels"]["sgp40"] = chan(ui.ST_WARMUP, warm_left=47,
+                              enabled=cfg.SGP40_ENABLED)
 u.show_main(s)
 dump(oled, "第 1 页 主界面 - 有未连接 + 预热倒计时")
 
 # ---------------------------------------------------------------- 主界面 报警
-s = snapshot({}, dict(FULL, co2=1680, tvoc=310, hcho_mg=0.12, hcho_ppb=96),
-             alarm={"scd40": True, "sgp40": True, "ze08": True})
+s = snapshot({}, dict(FULL, tvoc=310, hcho_mg=0.12, hcho_ppb=96),
+             alarm={"sgp40": True, "ze08": True})
 u.show_main(s)
-dump(oled, "第 1 页 主界面 - 三项超标")
+dump(oled, "第 1 页 主界面 - 两项超标")
 
 # ---------------------------------------------------------------- 主界面 学习期
 s = snapshot({}, FULL)
@@ -123,8 +111,14 @@ s["channels"]["sgp40"]["learning"] = True
 u.show_main(s)
 dump(oled, "第 1 页 主界面 - TVOC 仍在学习基线")
 
+# ---------------------------------------------------------------- 某一项被关掉
+s = snapshot({}, FULL)
+s["channels"]["ze08"]["enabled"] = False
+u.show_main(s)
+dump(oled, "第 1 页 主界面 - 甲醛通道关闭时不占版面")
+
 # ---------------------------------------------------------------- 第 2 页
-s = snapshot({"scd40": ui.ST_ABSENT, "ze08": ui.ST_FAULT}, FULL)
+s = snapshot({"ze08": ui.ST_FAULT}, FULL)
 u.page = ui.PAGE_INFO
 u.show_info(s)
 dump(oled, "第 2 页 运行信息")

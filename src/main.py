@@ -6,11 +6,11 @@ ESP32 空气质量检测仪 —— 主程序
     1. 初始化 I2C 总线, 扫描一遍总线上的地址
     2. 初始化 OLED 并显示开机画面
     3. 初始化 ZE08 用的 UART
-    4. 进入"传感器自检"画面, 逐个判断传感器是否连接
-    5. 自检结束后进入主界面, 并开始周期采集:
+    4. 直接进入主界面, 后台逐个探测传感器是否连接:
          - 预热中的传感器显示"预热中 + 倒计时", 不参与报警判定
          - 未连接的传感器显示"未连接", 每 10 秒自动重找一次(支持热插拔)
-    6. 按键(GPIO27)切换 主界面 / 运行信息 / 原始数据 三页
+         - 能正常读数的传感器照常显示数值
+    5. 按键(GPIO0, 板载 BOOT 键)切换 主界面 / 运行信息 / 原始数据 三页
 
 所有任务都在 asyncio 里跑, 采集不阻塞屏幕刷新。
 """
@@ -48,7 +48,6 @@ class App:
         self._btn_last = 1
         self._btn_ms = 0
         self._ui_fails = 0
-        self.selftest_until = 0
 
     # ------------------------------------------------------------------
     # 初始化
@@ -129,7 +128,6 @@ class App:
     # 任务: I2C 三个传感器
     # ------------------------------------------------------------------
     async def task_i2c(self):
-        n = 0
         while True:
             t0 = ticks_ms()
             try:
@@ -140,9 +138,6 @@ class App:
                     self.mgr.last_scan = now
                 self.mgr._step_sht40(now)
                 self.mgr._step_sgp40(now)
-                if n % cfg.SCD40_EVERY == 0:
-                    self.mgr._step_scd40(now)
-                n += 1
             except Exception as e:
                 log("[i2c] 任务异常:", type(e).__name__, e)
             spent = ticks_diff(ticks_ms(), t0)
@@ -168,12 +163,9 @@ class App:
         while True:
             if self.view is not None:
                 try:
-                    probing = (not self.mgr.all_resolved()) or \
-                        ticks_diff(ticks_ms(), self.selftest_until) < 0
-                    if probing:
-                        self.view.show_selftest(self.mgr.selftest_rows())
-                    else:
-                        self.view.render(self.mgr.snapshot())
+                    # 开机直接进主界面: 没接上/自检有问题的传感器
+                    # 在主界面上用 ! / ? 和底部状态栏标出来, 不再单开自检页。
+                    self.view.render(self.mgr.snapshot())
                     self._ui_fails = 0
                 except Exception as e:
                     self._ui_fails += 1
@@ -261,7 +253,6 @@ class App:
                                          oled_ok=(self.view is not None),
                                          on_bus_rebuilt=self.rebind_i2c)
         self.mgr.scan_bus()
-        self.selftest_until = ticks_ms() + 2000
 
         if self.view is None:
             log("[oled] 屏幕未连接 —— 数据只打印到串口")
