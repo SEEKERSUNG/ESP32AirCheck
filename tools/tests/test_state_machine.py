@@ -10,11 +10,14 @@
      否则界面每 RESCAN_MS 就闪一次"自检中"
   3. learning 只属于 SGP40, 否则其它行会一直显示 ~ 并盖掉报警星号
   4. 报警判定不能依赖屏幕刷新(OLED 没接也要能报警)
+  5. 总线恢复失败时要保留上次地址, 下一轮扫描继续重试
+  6. 10 秒无操作熄屏; 按键只唤醒, 不翻页
 """
 
 import time
 
 import config as cfg
+import main
 import sensors
 from ui import ST_PROBE, ST_ABSENT, ST_WARMUP, ST_READY
 
@@ -38,6 +41,19 @@ class FakeI2C:
 
     def readfrom(self, addr, n):
         raise OSError("no device")
+
+
+class FakeScanI2C:
+    """扫描结果可控, 用来测总线恢复的边沿/重试逻辑。"""
+
+    def __init__(self, found):
+        self.found = found
+
+    def scan(self):
+        return list(self.found)
+
+    def deinit(self):
+        pass
 
 
 class FakeUART:
@@ -121,6 +137,72 @@ mgr.values["hcho_mg"] = cfg.HCHO_ALARM + 0.02
 check(mgr.any_alarm(), "甲醛超阈值 -> any_alarm() = True")
 mgr.values["hcho_mg"] = None
 check(not mgr.any_alarm(), "甲醛无数据 -> any_alarm() = False")
+
+# ---------------------------------------------------------------- 6
+print()
+print("=== 6. 总线恢复失败时要保留上次地址, 下一轮继续重试 ===")
+m = sensors.SensorManager(FakeScanI2C([0x3C]), FakeUART(), oled_ok=False)
+m.scan_bus()
+check(m._prev_addrs == [0x3C], "初始扫描记录 0x3C")
+
+m.i2c.found = []
+m._rebuild_bus = lambda: False
+m.scan_bus()
+check(m._prev_addrs == [0x3C], "恢复失败后仍保留上次地址")
+
+m._rebuild_bus = lambda: True
+m.scan_bus()
+check(m._prev_addrs == [], "恢复成功且总线空闲后清空, 不再反复重建")
+
+# ---------------------------------------------------------------- 7
+print()
+print("=== 7. 10 秒无操作熄屏, 按键只唤醒不翻页 ===")
+
+
+class FakeView:
+    def __init__(self):
+        self.page = 0
+        self.off = 0
+        self.on = 0
+        self.pages = 0
+
+    def screen_off(self):
+        self.off += 1
+        return True
+
+    def screen_on(self):
+        self.on += 1
+        return True
+
+    def next_page(self):
+        self.page = (self.page + 1) % 3
+        self.pages += 1
+
+
+app = main.App()
+view = FakeView()
+app.view = view
+app.button = None
+now = 100000
+app._last_activity = now
+app._screen_on = True
+
+app._check_screen_off(now + cfg.SCREEN_OFF_MS + 1)
+check(app._screen_on and view.off == 0, "没有按键时不自动熄屏")
+
+app.button = object()           # 有按键才允许自动熄屏
+app._check_screen_off(now + cfg.SCREEN_OFF_MS - 1)
+check(app._screen_on and view.off == 0, "不到 10 秒不息屏")
+
+app._check_screen_off(now + cfg.SCREEN_OFF_MS)
+check((not app._screen_on) and view.off == 1, "满 10 秒熄屏")
+
+app._on_button_press(now + cfg.SCREEN_OFF_MS + 1)
+check(app._screen_on and view.on == 1 and view.pages == 0,
+      "按键只唤醒, 不翻页")
+
+app._on_button_press(now + cfg.SCREEN_OFF_MS + 2)
+check(view.pages == 1, "再按一次才翻页")
 
 # ---------------------------------------------------------------- 汇总
 print()

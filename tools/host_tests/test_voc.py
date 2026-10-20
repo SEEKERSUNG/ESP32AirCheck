@@ -8,9 +8,15 @@ VOC 算法回归测试 (在电脑上跑, 不需要开发板)
   2. 恒定信号输入时, 指数会收敛到基线值 100 附近
   3. 浓度阶跃上升时, 指数先明显冲高, 再随着基线学习慢慢回落
 
+另外验证基线持久化相关接口:
+  4. export_state() / import_state() 恢复后, 后续轨迹与不中断完全一致
+  5. mUptime 每个采样都累加 (不能停在 blackout 的 46 秒)
+  6. 版本/采样间隔不匹配的状态会被拒绝
+
 用法: python tools/host_tests/test_voc.py
 """
 
+import json
 import os
 import sys
 
@@ -92,6 +98,49 @@ def main():
         ok = False
     else:
         print("PASS: 算法确定性一致, 500 秒后指数 = %d" % a[-1])
+
+    # ---- 5. 状态导出/导入: 恢复后继续运行应与不中断完全一致 ----
+    a = voc.VocAlgorithm()
+    feed(a, 30000, 2000)
+    state = a.export_state()
+    b = voc.VocAlgorithm()
+    restored = b.import_state(json.loads(json.dumps(state)))
+    tail_a = feed(a, 30000, 300)
+    tail_b = feed(b, 30000, 300)
+    if not restored:
+        print("FAIL: 基线状态导入失败")
+        ok = False
+    elif tail_a != tail_b:
+        print("FAIL: 恢复基线后算法轨迹与不中断不一致")
+        ok = False
+    else:
+        print("PASS: 导出/导入基线后继续计算一致 (idx=%d)" % tail_a[-1])
+
+    # ---- 6. mUptime 应持续累加, 不能停在 blackout 阶段 ----
+    algo = voc.VocAlgorithm()
+    feed(algo, 30000, 100)
+    if abs(algo.mUptime - 100.0) > 0.01:
+        print("FAIL: mUptime = %.1f, 期望 100" % algo.mUptime)
+        ok = False
+    else:
+        print("PASS: mUptime 正常累加 (100 次采样后 = 100s)")
+
+    # ---- 7. 版本/类型不匹配的状态必须拒绝 ----
+    bad = dict(state)
+    bad["version"] = 999
+    if voc.VocAlgorithm().import_state(bad):
+        print("FAIL: 版本不匹配的状态被接受了")
+        ok = False
+    else:
+        print("PASS: 版本不匹配的状态被拒绝")
+
+    bad = dict(state)
+    bad["interval"] = 2.0
+    if voc.VocAlgorithm().import_state(bad):
+        print("FAIL: 采样间隔不匹配的状态被接受了")
+        ok = False
+    else:
+        print("PASS: 采样间隔不匹配的状态被拒绝")
 
     print("\n结果:", "全部通过" if ok else "有失败项")
     return 0 if ok else 1

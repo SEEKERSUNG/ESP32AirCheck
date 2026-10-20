@@ -11,6 +11,7 @@ ESP32 空气质量检测仪 —— 主程序
          - 未连接的传感器显示"未连接", 每 10 秒自动重找一次(支持热插拔)
          - 能正常读数的传感器照常显示数值
     5. 按键(GPIO0, 板载 BOOT 键)切换 主界面 / 运行信息 / 原始数据 三页
+    6. 10 秒无按键操作自动熄屏, 按 BOOT 键唤醒(唤醒那次不翻页)
 
 所有任务都在 asyncio 里跑, 采集不阻塞屏幕刷新。
 """
@@ -48,6 +49,8 @@ class App:
         self._btn_last = 1
         self._btn_ms = 0
         self._ui_fails = 0
+        self._screen_on = True
+        self._last_activity = ticks_ms()
 
     # ------------------------------------------------------------------
     # 初始化
@@ -125,6 +128,33 @@ class App:
             self.led.value(1 if on else 0)
 
     # ------------------------------------------------------------------
+    # 息屏 / 唤醒
+    # ------------------------------------------------------------------
+    def _check_screen_off(self, now):
+        """无操作超时后关屏。只关显示, 采集/报警/LED 继续工作。"""
+        # 没有按键就没法唤醒, 这种情况下不能自动熄屏
+        if self.view is None or self.button is None \
+                or not self._screen_on or cfg.SCREEN_OFF_MS <= 0:
+            return
+        if ticks_diff(now, self._last_activity) < cfg.SCREEN_OFF_MS:
+            return
+        if self.view.screen_off():
+            self._screen_on = False
+            log("[ui] %d 秒无操作, 熄屏" % (cfg.SCREEN_OFF_MS // 1000))
+
+    def _on_button_press(self, now):
+        """按键: 熄屏时只唤醒, 亮屏时才翻页。"""
+        self._last_activity = now
+        if not self._screen_on:
+            if self.view is not None and self.view.screen_on():
+                self._screen_on = True
+                log("[ui] 按键唤醒")
+            return
+        if self.view is not None:
+            self.view.next_page()
+            log("[ui] 切换到第 %d 页" % (self.view.page + 1))
+
+    # ------------------------------------------------------------------
     # 任务: I2C 三个传感器
     # ------------------------------------------------------------------
     async def task_i2c(self):
@@ -162,17 +192,19 @@ class App:
     async def task_ui(self):
         while True:
             if self.view is not None:
-                try:
-                    # 开机直接进主界面: 没接上/自检有问题的传感器
-                    # 在主界面上用 ! / ? 和底部状态栏标出来, 不再单开自检页。
-                    self.view.render(self.mgr.snapshot())
-                    self._ui_fails = 0
-                except Exception as e:
-                    self._ui_fails += 1
-                    if self._ui_fails == 5:
-                        log("[oled] 连续刷新失败, 停止显示:", e)
-                    if self._ui_fails >= 5:
-                        self.view = None
+                self._check_screen_off(ticks_ms())
+                if self._screen_on:
+                    try:
+                        # 开机直接进主界面: 主界面只显示读数,
+                        # 连接/预热/异常状态统一看第 2 页。
+                        self.view.render(self.mgr.snapshot())
+                        self._ui_fails = 0
+                    except Exception as e:
+                        self._ui_fails += 1
+                        if self._ui_fails == 5:
+                            log("[oled] 连续刷新失败, 停止显示:", e)
+                        if self._ui_fails >= 5:
+                            self.view = None
             await asyncio.sleep_ms(cfg.UI_PERIOD_MS)
 
     # ------------------------------------------------------------------
@@ -188,9 +220,7 @@ class App:
                 if self._btn_last == 1 and v == 0 and \
                         ticks_diff(now, self._btn_ms) > 250:
                     self._btn_ms = now
-                    if self.view is not None:
-                        self.view.next_page()
-                        log("[ui] 切换到第 %d 页" % (self.view.page + 1))
+                    self._on_button_press(now)
                 self._btn_last = v
             except Exception:
                 pass
@@ -255,8 +285,11 @@ class App:
         self.mgr.scan_bus()
 
         if self.view is None:
-            log("[oled] 屏幕未连接 —— 数据只打印到串口")
+            log("[oled] 屏幕未连接 —— 数据仍在采集, 但无法显示")
             self.mgr.oled_ok = False
+
+        # 开机画面/初始化不算用户操作, 从进入主循环开始计时
+        self._last_activity = ticks_ms()
 
         await asyncio.gather(
             self.task_i2c(),

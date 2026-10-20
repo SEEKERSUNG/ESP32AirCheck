@@ -95,6 +95,11 @@ class SH1106(framebuf.FrameBuffer):
     def invert(self, invert):
         self.write_cmd(SET_NORM_INV | (invert & 1))
 
+    def rotate(self, rotate):
+        """和 SSD1306 一样, 通过 COM 扫描方向和段重映射实现 180° 翻转。"""
+        self.write_cmd(SET_COM_OUT_DIR | ((rotate & 1) << 3))
+        self.write_cmd(SET_SEG_REMAP | (rotate & 1))
+
     def show(self):
         """SH1106 只能按页写, 每页 128 字节。"""
         buf = self.buffer

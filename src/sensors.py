@@ -2,7 +2,7 @@
 """
 传感器管理
 ================================================================
-负责四件事:
+负责五件事:
 
   1. 上电检测 —— 每个传感器是否真的接上了
      I2C 传感器: 先扫地址, 再做一次功能探测(读序列号 / 读一帧数据并校验 CRC),
@@ -21,10 +21,22 @@
      没接上的传感器每 RESCAN_MS 重新找一次; 已经在线的传感器如果掉线,
      也会被重新标记为"未连接"。所以分批采购、单独调试都很方便:
      插上就能用, 拔掉自动变成"未连接"。
+
+  5. VOC 基线持久化
+     每 VOC_STATE_SAVE_MS 把 voc.VocAlgorithm 的状态存入 ESP32 NVS;
+     SGP40 连接时恢复, 避免每次断电都从零学习。SGP40 本身不保存基线。
 """
 
 from time import ticks_ms, ticks_diff, sleep_us
 from machine import Pin, I2C
+
+import json
+import os
+
+try:
+    import esp32
+except ImportError:
+    esp32 = None
 
 import config as cfg
 import sht40
@@ -33,6 +45,71 @@ import ze08
 import voc
 
 from ui import ST_PROBE, ST_ABSENT, ST_WARMUP, ST_READY, ST_FAULT
+
+# VOC 基线状态存放位置: 优先 ESP32 NVS, 不可用时退回文件。
+# 注意是 ESP32 自己的 flash —— SGP40 内部没有基线存储。
+_VOC_NVS_NAMESPACE = "aircheck"
+_VOC_NVS_KEY = "vocstate"
+_VOC_STATE_FILE = "/voc_state.json"
+_VOC_STATE_BUF = 2048
+
+
+def _load_state_blob(namespace=_VOC_NVS_NAMESPACE, key=_VOC_NVS_KEY):
+    """读取保存的状态; 没有则返回 None。"""
+    if esp32 is not None:
+        try:
+            nvs = esp32.NVS(namespace)
+            buf = bytearray(_VOC_STATE_BUF)
+            n = nvs.get_blob(key, buf)
+            if n:
+                return bytes(buf[:n])
+        except Exception:
+            pass
+    try:
+        with open(_VOC_STATE_FILE, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _save_state_blob(blob, namespace=_VOC_NVS_NAMESPACE, key=_VOC_NVS_KEY):
+    """保存状态。NVS 带磨损均衡和掉电保护; 文件方式做临时文件+改名。"""
+    if esp32 is not None:
+        try:
+            nvs = esp32.NVS(namespace)
+            nvs.set_blob(key, blob)
+            nvs.commit()
+            return True
+        except Exception as e:
+            print("[voc] NVS 保存失败:", e)
+    try:
+        tmp = _VOC_STATE_FILE + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(blob)
+        try:
+            os.remove(_VOC_STATE_FILE)
+        except OSError:
+            pass
+        os.rename(tmp, _VOC_STATE_FILE)
+        return True
+    except Exception as e:
+        print("[voc] 文件保存失败:", e)
+        return False
+
+
+def _erase_state(namespace=_VOC_NVS_NAMESPACE, key=_VOC_NVS_KEY):
+    """删除已保存的状态 (测试/手动重置用)。"""
+    if esp32 is not None:
+        try:
+            nvs = esp32.NVS(namespace)
+            nvs.erase_key(key)
+            nvs.commit()
+        except Exception:
+            pass
+    try:
+        os.remove(_VOC_STATE_FILE)
+    except OSError:
+        pass
 
 
 class Channel:
@@ -180,6 +257,7 @@ class SensorManager:
         self.algo = voc.VocAlgorithm()
 
         self._sgp_learn_ms = 0
+        self._voc_save_ms = None
 
     # ==================== 总线扫描 ====================
     def _scan_once(self):
@@ -223,18 +301,25 @@ class SensorManager:
 
         print("[i2c] 已重建 I2C 外设, 总线%s"
               % ("回到空闲" if idle else "仍被拉低(查接线/短路)"))
-        return True
+        return idle
 
     def scan_bus(self):
         addrs = self._scan_once()
 
         # 上一轮还扫到设备, 这一轮整条总线却全空 —— 多半是热插拔把 I2C 卡死了
         if not addrs and self._prev_addrs:
+            old = self._prev_addrs
             print("[i2c] 上次还扫到 %s, 这次总线全空, 尝试恢复"
-                  % [hex(a) for a in self._prev_addrs])
+                  % [hex(a) for a in old])
             if self._rebuild_bus():
                 addrs = self._scan_once()
-        self._prev_addrs = addrs
+                self._prev_addrs = addrs
+            else:
+                # 总线仍被拉低或重建失败: 保留上次的地址, 下一轮继续尝试,
+                # 不能在这里清空, 否则就再也不会自动恢复了。
+                self._prev_addrs = old
+        else:
+            self._prev_addrs = addrs
 
         self.scan_addrs = set(addrs)
         self.info["scan"] = " ".join("%02X" % a for a in addrs)
@@ -252,6 +337,16 @@ class SensorManager:
 
     def _forget(self, key):
         ch = self.ch[key]
+        # 热插拔/掉线前把最新基线补存一次, 不用等下一个 10 分钟周期。
+        # 至少间隔 60 秒, 避免传感器接触不良反复掉线时高频擦写 flash。
+        if key == "sgp40" and cfg.VOC_STATE_PERSIST \
+                and self.drv_sgp is not None \
+                and ch.state in (ST_READY, ST_WARMUP):
+            now = ticks_ms()
+            if self._voc_save_ms is None or \
+                    ticks_diff(now, self._voc_save_ms) >= 60000:
+                self._save_voc_state()
+                self._voc_save_ms = now
         ch.drop(ticks_ms())
         if key == "sht40":
             self.drv_sht = None
@@ -331,9 +426,19 @@ class SensorManager:
                 ch.error = str(e)
                 return
             self.drv_sgp = d
-            self.algo = voc.VocAlgorithm()      # 重新开始学习基线
+            self.algo = voc.VocAlgorithm()      # 默认重新开始学习基线
+            restored = False
+            if cfg.VOC_STATE_PERSIST:
+                restored = self._restore_voc_state()
+            self._voc_save_ms = now
             self._sgp_learn_ms = now
             ch.begin_warmup(now)
+            if restored:
+                # 基线已经恢复, "学习期"标记按算法已累计的采样时间扣减
+                left = cfg.VOC_LEARN_S - int(self.algo.mUptime)
+                if left < 0:
+                    left = 0
+                ch.learn_end = now + left * 1000
             print("[SGP40] 已连接, 预热 %ds" % ch.warmup_s)
 
         if ch.state == ST_WARMUP and ticks_diff(now, ch.warm_end) >= 0:
@@ -358,6 +463,14 @@ class SensorManager:
         self.info["voc_uptime"] = int(self.algo.mUptime)
         self.info["voc_learning"] = (
             ch.state == ST_READY and ticks_diff(ch.learn_end, now) > 0)
+
+        # 每 VOC_STATE_SAVE_MS 保存一次基线
+        if cfg.VOC_STATE_PERSIST and cfg.VOC_STATE_SAVE_MS > 0:
+            if self._voc_save_ms is None:
+                self._voc_save_ms = now
+            elif ticks_diff(now, self._voc_save_ms) >= cfg.VOC_STATE_SAVE_MS:
+                self._save_voc_state()
+                self._voc_save_ms = now
 
     # ==================== ZE08 ====================
     def _step_ze08(self):
@@ -414,6 +527,37 @@ class SensorManager:
         if ch.state == ST_WARMUP and ticks_diff(now, ch.warm_end) >= 0:
             ch.state = ST_READY
             print("[ZE08] 预热完成")
+
+    # ==================== VOC 基线持久化 ====================
+    def _restore_voc_state(self):
+        """SGP40 连接时调用; 找到有效状态就恢复, 否则返回 False。"""
+        blob = _load_state_blob()
+        if not blob:
+            print("[voc] 没有已保存的基线, 重新学习")
+            return False
+        try:
+            state = json.loads(blob.decode())
+        except Exception as e:
+            print("[voc] 基线数据损坏, 重新学习:", e)
+            return False
+        if not self.algo.import_state(state):
+            print("[voc] 基线数据不兼容, 重新学习")
+            return False
+        print("[voc] 已恢复基线 (累计学习 %ds)" % int(self.algo.mUptime))
+        return True
+
+    def _save_voc_state(self):
+        """把当前算法状态序列化后写入 NVS。"""
+        try:
+            blob = json.dumps(self.algo.export_state()).encode()
+        except Exception as e:
+            print("[voc] 基线序列化失败:", e)
+            return False
+        if not _save_state_blob(blob):
+            return False
+        if cfg.DEBUG:
+            print("[voc] 基线已保存 (%d 字节)" % len(blob))
+        return True
 
     # ==================== 报警判定 ====================
     def _eval_alarm(self):

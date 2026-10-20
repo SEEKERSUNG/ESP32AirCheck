@@ -22,6 +22,9 @@ VOC 指数的含义 (Sensirion 官方定义):
     * gating: 浓度突然飙升时冻结基线学习, 避免把污染"学成"正常
 
 采样间隔非常重要: 默认必须每 1 秒喂一次, 项目里也是按 1s 采样的。
+
+export_state() / import_state() 可以把基线状态序列化成 JSON 兼容的 dict,
+供 sensors.py 写入 ESP32 NVS, 实现跨断电继续学习。
 """
 
 import math
@@ -69,6 +72,9 @@ _PERSISTENCE_UPTIME_GAMMA = 3.0 * 3600.0
 _MVE_GAMMA_SCALING = 64.0
 _MVE_ADDITIONAL_GAMMA_MEAN_SCALING = 8.0
 _MVE_FIX16_MAX = 32767.0
+
+# 跨断电保存的状态格式版本。字段/算法变化时加 1, 旧状态会被丢弃。
+_STATE_VERSION = 1
 
 
 class VocAlgorithm:
@@ -177,6 +183,109 @@ class VocAlgorithm:
         self.mSraw_Std_Initial = float(std_initial)
         self.mIndex_Gain = float(gain_factor)
         self._init_instances()
+
+    # ------------------------------------------------------------------
+    # 状态导出 / 恢复 (用于跨断电保存基线)
+    # ------------------------------------------------------------------
+    def _tuning(self):
+        """影响算法轨迹的调参值; 恢复时如果不一致就拒绝旧状态。"""
+        return (
+            self.mIndex_Offset,
+            self.mTau_Mean_Hours,
+            self.mTau_Variance_Hours,
+            self.mGating_Max_Duration_Minutes,
+            self.mSraw_Std_Initial,
+            self.mIndex_Gain,
+        )
+
+    def export_state(self):
+        """
+        导出基线状态, 返回可直接 JSON 序列化的 dict。
+        只保存会随时间变化的状态; 算法常量和调参值由构造函数重建。
+        """
+        p = self
+        return {
+            "version": _STATE_VERSION,
+            "type": "nox" if p._type == _ALGORITHM_TYPE_NOX else "voc",
+            "interval": p.mSamplingInterval,
+            "tuning": list(p._tuning()),
+            "uptime": p.mUptime,
+            "sraw": p.mSraw,
+            "index": p.mVoc_Index,
+            "mve_init": p._mve_Initialized,
+            "mve_mean": p._mve_Mean,
+            "mve_offset": p._mve_Sraw_Offset,
+            "mve_std": p._mve_Std,
+            "mve_gamma_mean": p._mve_Gamma_Mean_used,
+            "mve_gamma_var": p._mve_Gamma_Variance_used,
+            "mve_uptime_gamma": p._mve_Uptime_Gamma,
+            "mve_uptime_gating": p._mve_Uptime_Gating,
+            "mve_gating_minutes": p._mve_Gating_Duration_Minutes,
+            "mox_std": p._mox_Sraw_Std,
+            "mox_mean": p._mox_Sraw_Mean,
+            "lp_init": p._lp_Initialized,
+            "lp_x1": p._lp_X1,
+            "lp_x2": p._lp_X2,
+            "lp_x3": p._lp_X3,
+        }
+
+    def import_state(self, state):
+        """
+        从 export_state() 的结果恢复状态。
+
+        版本、算法类型、采样间隔或调参值不一致时返回 False;
+        数据损坏时也会先 reset(), 调用者可以把它当成全新的算法继续用。
+        """
+        try:
+            if not isinstance(state, dict):
+                return False
+            if state.get("version") != _STATE_VERSION:
+                return False
+            want_type = ("nox" if self._type == _ALGORITHM_TYPE_NOX
+                         else "voc")
+            if state.get("type") != want_type:
+                return False
+            if abs(float(state["interval"]) - self.mSamplingInterval) > 1e-6:
+                return False
+
+            saved_tuning = state["tuning"]
+            if len(saved_tuning) != len(self._tuning()):
+                return False
+            for a, b in zip(saved_tuning, self._tuning()):
+                if abs(float(a) - float(b)) > 1e-6:
+                    return False
+
+            p = self
+            p.mUptime = float(state["uptime"])
+            p.mSraw = float(state["sraw"])
+            p.mVoc_Index = float(state["index"])
+            p._mve_Initialized = bool(state["mve_init"])
+            p._mve_Mean = float(state["mve_mean"])
+            p._mve_Sraw_Offset = float(state["mve_offset"])
+            p._mve_Std = float(state["mve_std"])
+            p._mve_Gamma_Mean_used = float(state["mve_gamma_mean"])
+            p._mve_Gamma_Variance_used = float(state["mve_gamma_var"])
+            p._mve_Uptime_Gamma = float(state["mve_uptime_gamma"])
+            p._mve_Uptime_Gating = float(state["mve_uptime_gating"])
+            p._mve_Gating_Duration_Minutes = float(state["mve_gating_minutes"])
+            p._mox_Sraw_Std = float(state["mox_std"])
+            p._mox_Sraw_Mean = float(state["mox_mean"])
+            p._lp_Initialized = bool(state["lp_init"])
+            p._lp_X1 = float(state["lp_x1"])
+            p._lp_X2 = float(state["lp_x2"])
+            p._lp_X3 = float(state["lp_x3"])
+
+            # 基本合法性检查, 防止损坏的数据把算法带飞
+            if (p.mUptime < 0.0 or p._mve_Std <= 0.0
+                    or p._mox_Sraw_Std <= 0.0
+                    or p.mVoc_Index < 0.0 or p.mVoc_Index > 500.0
+                    or p._lp_X1 < 0.0 or p._lp_X2 < 0.0 or p._lp_X3 < 0.0):
+                self.reset()
+                return False
+            return True
+        except (KeyError, TypeError, ValueError):
+            self.reset()
+            return False
 
     # ------------------------------------------------------------------
     # mean variance estimator
@@ -348,7 +457,7 @@ class VocAlgorithm:
         """
         p = self
         if p.mUptime <= _INITIAL_BLACKOUT:
-            p.mUptime += p.mSamplingInterval
+            pass                                # blackout: 只累计时间
         else:
             if 0 < sraw < 65000:
                 if sraw < p.mSraw_Minimum + 1:
@@ -371,4 +480,8 @@ class VocAlgorithm:
                 p._mox_Sraw_Std = p._mve_get_std()
                 p._mox_Sraw_Mean = p._mve_get_mean()
 
+        # mUptime 每个采样都累加。它只参与 blackout 判断, 不改变指数输出;
+        # 但基线持久化后可以用它判断算法已经学习了多久。
+        # (原实现只在 blackout 分支里加, 45 秒后就停在 46 左右。)
+        p.mUptime += p.mSamplingInterval
         return int(p.mVoc_Index + 0.5)

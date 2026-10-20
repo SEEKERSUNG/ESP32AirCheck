@@ -5,8 +5,8 @@ OLED 界面渲染
 本模块只负责"把数据画到屏幕上", 不碰任何传感器, 方便单独调试界面。
 
 界面一共有 3 页(按键 GPIO0 循环切换):
-    第 1 页 主界面   : 温湿度 / 甲醛 / TVOC + 状态栏
-    第 2 页 运行信息 : 各传感器在线状态 + 运行时间
+    第 1 页 主界面   : 温湿度 / 甲醛 / TVOC (只显示读数, 不显示连接状态)
+    第 2 页 运行信息 : 各传感器在线状态 + 运行时间 (判断连接/预热/异常看这页)
     第 3 页 原始数据 : VOC 原始值、串口收包统计等, 单独调传感器时用
 
 排版约定 (屏幕 128x64, 左上角为原点)
@@ -59,13 +59,6 @@ _TXT = {
     "alarm":    ("超标", "OVER"),
     "allok":    ("全部就绪", "ALL OK"),
 }
-
-# 主界面状态栏 / 指示灯 的顺序
-_CH_DISPLAY = (
-    ("sht40", "温湿度", "T/H"),
-    ("ze08", "甲醛", "HCHO"),
-    ("sgp40", "TVOC", "TVOC"),
-)
 
 
 def T(key):
@@ -216,6 +209,22 @@ class UI:
         if hasattr(self.oled, "i2c"):
             self.oled.i2c = i2c
 
+    # ================= 息屏 / 唤醒 =================
+    def screen_off(self):
+        """关闭显示。只发 DISP OFF, 不清显存, 唤醒后先恢复上一帧。"""
+        try:
+            self.oled.poweroff()
+            return True
+        except Exception:
+            return False
+
+    def screen_on(self):
+        try:
+            self.oled.poweron()
+            return True
+        except Exception:
+            return False
+
     def text(self, s, x, y):
         """纯英文/数字文本。"""
         self.oled.text(s, x, y)
@@ -244,9 +253,6 @@ class UI:
     def _page_indicator(self, x=64):
         self.oled.text("%d/%d" % (self.page + 1, PAGE_COUNT), x, 4)
 
-    def _spinner(self, x, y):
-        self.oled.text("|/-\\"[(time.ticks_ms() // 120) % 4], x, y)
-
     # ================= 开机 / 通用提示 =================
     def splash(self):
         self.clear()
@@ -272,129 +278,43 @@ class UI:
         vals = snap["values"]
         alarm = snap["alarm"]
 
-        # 顶部: 标题 + 页码 + 转动指示 + 状态灯(关掉的传感器不占位)
+        # 顶部只留标题 + 页码。连接/预热/异常状态统一放第 2 页,
+        # 主界面专心显示读数, 不再用 ! / ? / 状态灯 / 状态栏打扰视线。
         self.ptext(T("title"), 0, 0)
-        self._page_indicator()
-        self._spinner(88, 4)
-        i = 0
-        for key, _zh, _en in _CH_DISPLAY:
-            if not chans[key].get("enabled", True):
-                continue
-            self._health_dot(96 + i * 8, 5, chans[key]["state"], alarm.get(key))
-            i += 1
+        self._page_indicator(104)
 
-        # 数据行: 关掉的传感器整行不画, 剩下的行自动往上收
-        if vals["temp"] is None or vals["rh"] is None:
-            t = "T --.-C H --.-%"
-        else:
-            t = "T %.1fC H %.1f%%" % (vals["temp"], vals["rh"])
-        rows = [("sht40", t)]
-
-        if vals["hcho_mg"] is None:
-            t = "HCHO ----"
-        else:
-            t = "HCHO %.3fmg/m3" % vals["hcho_mg"]
-        rows.append(("ze08", t))
-
-        if vals["tvoc"] is None:
-            t = "TVOC ---idx"
-        else:
-            t = "TVOC %3didx" % vals["tvoc"]
-        rows.append(("sgp40", t))
-
+        # 4 行读数: 标签左对齐, 数值从固定列(x=40)开始,
+        # 行距 12px, 把标题以下的 48px 均匀铺满。
+        rows = (
+            ("sht40", "TEMP",
+             "----" if vals["temp"] is None else "%.1f C" % vals["temp"]),
+            ("sht40", "HUM",
+             "----" if vals["rh"] is None else "%.1f %%" % vals["rh"]),
+            ("ze08", "HCHO",
+             "----" if vals["hcho_mg"] is None
+             else "%.3fmg/m3" % vals["hcho_mg"]),
+            ("sgp40", "TVOC",
+             "----" if vals["tvoc"] is None else "%3d idx" % vals["tvoc"]),
+        )
         y = 16
-        for key, text in rows:
+        for key, label, text in rows:
             if not chans[key].get("enabled", True):
                 continue
-            self._data_row(y, text, chans[key], alarm.get(key))
-            y += 8
+            self._value_row(y, label, text, alarm.get(key))
+            y += 12
 
-        self._status_line(snap, y=self.height - 16)
         self.flush()
 
-    def _data_row(self, y, text, ch, is_alarm):
-        self.text(text, 0, y)
-        state = ch["state"]
-        x = self.width - 8
-        if state == ST_ABSENT:
-            self.text("!", x, y)
-        elif state == ST_FAULT:
-            self.text("?", x, y)
-        elif state in (ST_PROBE, ST_WARMUP):
-            self._spinner(x, y)
-        elif ch.get("learning"):
-            self.text("~", x, y)                 # SGP40 还在学习基线
-        elif is_alarm:
-            self.text("*" if (time.ticks_ms() // 400) & 1 else " ", x, y)
-
-    def _health_dot(self, x, y, state, is_alarm):
-        o = self.oled
-        if state == ST_READY:
-            if is_alarm and not (time.ticks_ms() // 400) & 1:
-                o.rect(x, y, 6, 6, 1)            # 报警时闪
-            else:
-                o.fill_rect(x, y, 6, 6, 1)
-        elif state == ST_WARMUP:
-            o.rect(x, y, 6, 6, 1)
-            o.pixel(x + 3, y + 3, 1)
-        elif state == ST_PROBE:
-            o.rect(x, y, 6, 6, 1)
-        else:                                     # ABSENT / FAULT
-            o.rect(x, y, 6, 6, 1)
-            o.line(x, y, x + 5, y + 5, 1)
-            o.line(x + 5, y, x, y + 5, 1)
-
-    def _name(self, key):
-        for k, zh, en in _CH_DISPLAY:
-            if k == key:
-                return zh if HAS_CFONT else en
-        return key
-
-    def _alarm_value(self, key, vals):
-        if key == "ze08":
-            return "%.3f" % (vals["hcho_mg"] or 0.0)
-        if key == "sgp40":
-            return "%d" % (vals["tvoc"] or 0)
-        return ""
-
-    def _status_line(self, snap, y):
-        """底部 16px 状态栏: 优先显示最需要关注的问题。"""
-        chans = snap["channels"]
-        vals = snap["values"]
-        alarm = snap["alarm"]
-        # 关掉的传感器不参与状态栏提示
-        keys = [k for k, _zh, _en in _CH_DISPLAY
-                if chans[k].get("enabled", True)]
-
-        for st, zh in ((ST_ABSENT, T("absent")), (ST_FAULT, T("fault"))):
-            for key in keys:
-                if chans[key]["state"] == st:
-                    self.ptext(self._name(key) + zh, 0, y)
-                    return
-        for key in keys:
-            if alarm.get(key):
-                self.ptext(self._name(key) + T("alarm") + " "
-                           + self._alarm_value(key, vals), 0, y)
-                return
-        for key in keys:
-            c = chans[key]
-            if c["state"] == ST_WARMUP:
-                left = int(c.get("warm_left", 0))
-                self.ptext(self._name(key) + T("warmup")
-                           + "%d:%02d" % (left // 60, left % 60), 0, y)
-                return
-        for key in keys:
-            if chans[key]["state"] == ST_PROBE:
-                self.ptext(T("probe") + self._name(key), 0, y)
-                return
-        # 一切正常: 左边显示"全部就绪", 右边显示运行时间
-        self.ptext(T("allok"), 0, y)
-        t = fmt_hms(snap["uptime"])
-        self.oled.text(t, self.width - 8 * len(t), y + 4)
+    def _value_row(self, y, label, value, is_alarm):
+        self.text(label, 0, y)
+        self.text(value, 40, y)
+        if is_alarm:
+            # 报警仍然保留在主界面: 数值右侧闪烁 *
+            self.text("*" if (time.ticks_ms() // 400) & 1 else " ", 120, y)
 
     # ================= 第 2 页 运行信息 =================
     # 这一页是诊断用的, 行距只有 8 像素, 放不下 16 像素高的汉字,
-    # 所以状态用英文缩写表示(中文状态在主页面的状态栏里)。
+    # 所以状态用英文缩写表示。主界面不再显示这些状态, 判断连接情况看这里。
     _STATE_EN = {
         ST_READY: "OK",
         ST_WARMUP: "WARM",
@@ -406,7 +326,13 @@ class UI:
     def show_info(self, snap):
         self.clear()
         chans = snap["channels"]
-        self.ptext(T("uptime") + " " + fmt_hms(snap["uptime"]), 0, 0)
+        t = fmt_hms(snap["uptime"])
+        # 右上角还要放 3 个字符的页码, 运行超过 99 小时后 H:MM:SS 会挤到页码上,
+        # 这时退化成 H:MM (例如 "100:12"), 仍能看出运行了多久。
+        if len(t) > 8:
+            total = int(snap["uptime"])
+            t = "%d:%02d" % (total // 3600, (total // 60) % 60)
+        self.ptext(T("uptime") + " " + t, 0, 0)
         self._page_indicator(104)
         rows = (
             ("SHT40", "0x44", "sht40"),
@@ -423,7 +349,8 @@ class UI:
                 s = self._STATE_EN.get(ch["state"], "?")
             self.oled.text(s, self.width - 8 * len(s), y)
             y += 8
-        self.text("I2C %s" % snap["info"].get("scan", ""), 0, y)
+        # 扫描结果可能超过 16 字符, 截断避免画出屏幕右边界
+        self.text(("I2C %s" % snap["info"].get("scan", ""))[:16], 0, y)
         self.flush()
 
     # ================= 第 3 页 原始数据 =================
@@ -437,7 +364,7 @@ class UI:
         self.text("SGP40 lrn %3d" % (1 if info.get("voc_learning") else 0), 0, 32)
         self.text("ZE08 rx %4d" % info.get("ze08_frames", 0), 0, 40)
         self.text("ZE08 bad %3d" % info.get("ze08_bad", 0), 0, 48)
-        self.text("I2C %s" % info.get("scan", ""), 0, 56)
+        self.text(("I2C %s" % info.get("scan", ""))[:16], 0, 56)
         self.flush()
 
     # ================= 按页刷新 =================

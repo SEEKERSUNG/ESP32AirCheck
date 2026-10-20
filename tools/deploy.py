@@ -76,7 +76,10 @@ def do_deploy(port, backup=False, files=None):
             args.append("+")
         args.extend(p)
     mpremote(port, *args, check=True)
-    print("上传完成。开发板会自动重启并运行 main.py。")
+    print("上传完成，正在重启开发板…")
+    # mpremote 的 fs cp 本身不会复位; 显式 reset 一下, 保证新代码立即生效。
+    mpremote(port, "reset", check=True)
+    print("开发板已重启，开始运行 main.py。")
     print("想直接看输出: python tools/deploy.py repl")
 
 

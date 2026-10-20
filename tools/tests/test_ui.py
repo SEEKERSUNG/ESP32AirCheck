@@ -21,6 +21,7 @@ class FakeOLED(framebuf.FrameBuffer):
         self.width = w
         self.height = h
         self.buf = bytearray(w * h // 8)
+        self.powered = True
         super().__init__(self.buf, w, h, framebuf.MONO_VLSB)
 
     def show(self):
@@ -28,6 +29,12 @@ class FakeOLED(framebuf.FrameBuffer):
 
     def contrast(self, v):
         pass
+
+    def poweroff(self):
+        self.powered = False
+
+    def poweron(self):
+        self.powered = True
 
 
 def dump(oled, title):
@@ -97,7 +104,7 @@ s = snapshot(warm, v)
 s["channels"]["sgp40"] = chan(ui.ST_WARMUP, warm_left=47,
                               enabled=cfg.SGP40_ENABLED)
 u.show_main(s)
-dump(oled, "第 1 页 主界面 - 有未连接 + 预热倒计时")
+dump(oled, "第 1 页 主界面 - 有通道未连接/预热时仍只显示读数")
 
 # ---------------------------------------------------------------- 主界面 报警
 s = snapshot({}, dict(FULL, tvoc=310, hcho_mg=0.12, hcho_ppb=96),
@@ -109,7 +116,7 @@ dump(oled, "第 1 页 主界面 - 两项超标")
 s = snapshot({}, FULL)
 s["channels"]["sgp40"]["learning"] = True
 u.show_main(s)
-dump(oled, "第 1 页 主界面 - TVOC 仍在学习基线")
+dump(oled, "第 1 页 主界面 - TVOC 学习期不在本页显示")
 
 # ---------------------------------------------------------------- 某一项被关掉
 s = snapshot({}, FULL)
@@ -123,9 +130,19 @@ u.page = ui.PAGE_INFO
 u.show_info(s)
 dump(oled, "第 2 页 运行信息")
 
+# ---- 超过 99 小时: 运行时间退化成 H:MM, 不能压到右上角页码 ----
+u.show_info(snapshot({}, FULL, uptime=100 * 3600 + 12 * 60 + 34))
+dump(oled, "第 2 页 - 运行超过 99 小时")
+
 # ---------------------------------------------------------------- 第 3 页
 u.page = ui.PAGE_RAW
 u.show_raw(s)
 dump(oled, "第 3 页 原始数据")
+
+# ---------------------------------------------------------------- 息屏/唤醒
+off_ok = u.screen_off()
+was_off = not oled.powered
+on_ok = u.screen_on()
+print("息屏/唤醒:", off_ok and was_off and on_ok and oled.powered)
 
 print("排版检查完毕: 请确认没有文字重叠、没有超出边框(最后一列/最后一行)")
