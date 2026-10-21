@@ -130,7 +130,6 @@ class Channel:
         self.learn_end = 0
         self.probe_start = 0
         self.next_probe = 0
-        self.asked = False
         self.fails = 0
         self.error = None
 
@@ -148,7 +147,6 @@ class Channel:
         self.next_probe = now + cfg.RESCAN_MS
         self.fails = 0
         self.probe_start = now
-        self.asked = False
 
     def snapshot(self, now):
         state = self.state
@@ -245,6 +243,7 @@ class SensorManager:
             "tvoc": None,
         }
         self.alarm = {"sht40": False, "ze08": False, "sgp40": False}
+        self.warn = {"sht40": False, "ze08": False, "sgp40": False}
         self.info = {
             "voc_raw": 0, "voc_learning": False, "voc_uptime": 0,
             "ze08_frames": 0, "ze08_bad": 0, "scan": "",
@@ -484,7 +483,6 @@ class SensorManager:
                 return
             ch.state = ST_PROBE
             ch.probe_start = now
-            ch.asked = False
             if self.drv_ze08 is None:
                 self.drv_ze08 = ze08.ZE08(self.uart)
             self.drv_ze08.reset()
@@ -494,6 +492,14 @@ class SensorManager:
             ch.probe_start = now
 
         z = self.drv_ze08
+
+        # 问答模式不会主动上传, 必须周期性地要数据。
+        # 主动模式(0x17)则完全不用发命令。
+        if ch.state in (ST_WARMUP, ST_READY) and z.mode == "qa":
+            if z._last_cmd_ms is None or \
+                    ticks_diff(now, z._last_cmd_ms) >= 900:
+                z.request_reading()
+
         got = z.poll()
         self.info["ze08_frames"] = z.frames
         self.info["ze08_bad"] = z.bad_frames
@@ -507,11 +513,13 @@ class SensorManager:
                 self.values["hcho_mg"] = z.ppb * ze08.PPB_TO_MG
                 ch.begin_warmup(now)
                 print("[ZE08] 已连接, 预热 %ds" % ch.warmup_s)
-            elif ticks_diff(now, ch.probe_start) > 500 and not ch.asked:
-                z.request_reading()             # 模块可能被切成问答模式
-                ch.asked = True
             elif ticks_diff(now, ch.probe_start) > 2500:
                 ch.drop(now, ST_ABSENT)
+            elif ticks_diff(now, ch.probe_start) > 500:
+                # 每 500ms 重试一次, 直到超时; 防止单次请求丢失
+                if z._last_cmd_ms is None or \
+                        ticks_diff(now, z._last_cmd_ms) >= 500:
+                    z.request_reading()
             return
 
         if got is not None:
@@ -563,12 +571,22 @@ class SensorManager:
     def _eval_alarm(self):
         v = self.values
         a = self.alarm
+        w = self.warn
+        ze_ready = self.ch["ze08"].state == ST_READY
+        sg_ready = self.ch["sgp40"].state == ST_READY
         # 只有在"预热完成"之后才判定, 避免预热期间的无效读数误报
-        a["ze08"] = (self.ch["ze08"].state == ST_READY
-                     and v["hcho_mg"] is not None and v["hcho_mg"] >= cfg.HCHO_ALARM)
-        a["sgp40"] = (self.ch["sgp40"].state == ST_READY
-                      and v["tvoc"] is not None and v["tvoc"] >= cfg.TVOC_ALARM)
+        a["ze08"] = (ze_ready and v["hcho_mg"] is not None
+                     and v["hcho_mg"] >= cfg.HCHO_ALARM)
+        a["sgp40"] = (sg_ready and v["tvoc"] is not None
+                      and v["tvoc"] >= cfg.TVOC_ALARM)
         a["sht40"] = False
+        # 警告级(不响蜂鸣器, 主界面显示 !); 报警时警告也同时为 True,
+        # 界面优先显示闪烁的 *。
+        w["ze08"] = (ze_ready and v["hcho_mg"] is not None
+                     and v["hcho_mg"] >= cfg.HCHO_WARN)
+        w["sgp40"] = (sg_ready and v["tvoc"] is not None
+                      and v["tvoc"] >= cfg.TVOC_WARN)
+        w["sht40"] = False
         return a
 
     def any_alarm(self):
@@ -592,5 +610,6 @@ class SensorManager:
             "channels": chans,
             "values": self.values,
             "alarm": self.alarm,
+            "warn": self.warn,
             "info": self.info,
         }

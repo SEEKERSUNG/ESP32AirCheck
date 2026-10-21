@@ -54,7 +54,8 @@ def chan(state, warm_left=0, learning=False, enabled=True):
             "warm_left": warm_left, "enabled": enabled}
 
 
-def snapshot(states, values, alarm=None, uptime=12 * 60 + 34, oled_ok=True):
+def snapshot(states, values, alarm=None, warn=None, uptime=12 * 60 + 34,
+             oled_ok=True):
     en = {"sht40": cfg.SHT40_ENABLED, "sgp40": cfg.SGP40_ENABLED,
           "ze08": cfg.ZE08_ENABLED}
     channels = {}
@@ -63,6 +64,9 @@ def snapshot(states, values, alarm=None, uptime=12 * 60 + 34, oled_ok=True):
     a = {"sht40": False, "ze08": False, "sgp40": False}
     if alarm:
         a.update(alarm)
+    w = {"sht40": False, "ze08": False, "sgp40": False}
+    if warn:
+        w.update(warn)
     return {
         "uptime": uptime,
         "oled_ok": oled_ok,
@@ -70,6 +74,7 @@ def snapshot(states, values, alarm=None, uptime=12 * 60 + 34, oled_ok=True):
         "channels": channels,
         "values": values,
         "alarm": a,
+        "warn": w,
         "info": {"voc_raw": 32145, "voc_learning": True, "voc_uptime": 120,
                  "ze08_frames": 121, "ze08_bad": 3,
                  "scan": "3C 44 59"},
@@ -112,11 +117,17 @@ s = snapshot({}, dict(FULL, tvoc=310, hcho_mg=0.12, hcho_ppb=96),
 u.show_main(s)
 dump(oled, "第 1 页 主界面 - 两项超标")
 
+# ---------------------------------------------------------------- 主界面 警告
+s = snapshot({}, dict(FULL, tvoc=180, hcho_mg=0.09, hcho_ppb=72),
+             warn={"sgp40": True, "ze08": True})
+u.show_main(s)
+dump(oled, "第 1 页 主界面 - 两项警告")
+
 # ---------------------------------------------------------------- 主界面 学习期
 s = snapshot({}, FULL)
 s["channels"]["sgp40"]["learning"] = True
 u.show_main(s)
-dump(oled, "第 1 页 主界面 - TVOC 学习期不在本页显示")
+dump(oled, "第 1 页 主界面 - VOC 学习期不在本页显示")
 
 # ---------------------------------------------------------------- 某一项被关掉
 s = snapshot({}, FULL)

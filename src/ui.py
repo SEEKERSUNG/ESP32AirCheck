@@ -277,14 +277,17 @@ class UI:
         chans = snap["channels"]
         vals = snap["values"]
         alarm = snap["alarm"]
+        warn = snap["warn"]
 
         # 顶部只留标题 + 页码。连接/预热/异常状态统一放第 2 页,
-        # 主界面专心显示读数, 不再用 ! / ? / 状态灯 / 状态栏打扰视线。
+        # 主界面只保留读数和超标/警告标记。
         self.ptext(T("title"), 0, 0)
         self._page_indicator(104)
 
         # 4 行读数: 标签左对齐, 数值从固定列(x=40)开始,
         # 行距 12px, 把标题以下的 48px 均匀铺满。
+        # HCHO 保留 2 位小数: ZE08 分辨率约 10 ppb (0.0125 mg/m3),
+        # 第 3 位小数没有实际意义。
         rows = (
             ("sht40", "TEMP",
              "----" if vals["temp"] is None else "%.1f C" % vals["temp"]),
@@ -292,25 +295,28 @@ class UI:
              "----" if vals["rh"] is None else "%.1f %%" % vals["rh"]),
             ("ze08", "HCHO",
              "----" if vals["hcho_mg"] is None
-             else "%.3fmg/m3" % vals["hcho_mg"]),
-            ("sgp40", "TVOC",
+             else "%.2fmg/m3" % vals["hcho_mg"]),
+            ("sgp40", "VOC",
              "----" if vals["tvoc"] is None else "%3d idx" % vals["tvoc"]),
         )
         y = 16
         for key, label, text in rows:
             if not chans[key].get("enabled", True):
                 continue
-            self._value_row(y, label, text, alarm.get(key))
+            self._value_row(y, label, text, alarm.get(key), warn.get(key))
             y += 12
 
         self.flush()
 
-    def _value_row(self, y, label, value, is_alarm):
+    def _value_row(self, y, label, value, is_alarm, is_warn):
         self.text(label, 0, y)
         self.text(value, 40, y)
         if is_alarm:
-            # 报警仍然保留在主界面: 数值右侧闪烁 *
+            # 报警优先: 数值右侧闪烁 *
             self.text("*" if (time.ticks_ms() // 400) & 1 else " ", 120, y)
+        elif is_warn:
+            # 警告级: 常亮 !; 不响蜂鸣器
+            self.text("!", 120, y)
 
     # ================= 第 2 页 运行信息 =================
     # 这一页是诊断用的, 行距只有 8 像素, 放不下 16 像素高的汉字,

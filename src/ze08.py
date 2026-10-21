@@ -37,10 +37,14 @@ CMD_SWITCH_ACTIVE = b"\xff\x01\x78\x40\x00\x00\x00\x00\x47"   # 切到主动上�
 CMD_SWITCH_QA = b"\xff\x01\x78\x41\x00\x00\x00\x00\x46"       # 切到问答模式
 CMD_READ_QA = b"\xff\x01\x86\x00\x00\x00\x00\x00\x79"         # 问答模式读浓度
 
-# 1 ppb 甲醛 = 0.00125 mg/m3  (1 ppm = 1.25 mg/m3, 25C 1atm)
+# 1 ppb 甲醛 = 0.00125 mg/m3 = 1.25 ug/m3
+# (模块手册取 1 ppm ≈ 1.25 mg/m3; 严格理想气体 25C 约 1.228, 见 README)
+PPB_TO_UGM3 = 1.25
 PPB_TO_MG = 0.00125
 
 _MAX_BUF = 64
+# ZE08 量程 0~5 ppm = 0~5000 ppb, 越界数据按量程上限处理
+_MAX_PPB = 5000
 
 
 def checksum(frame):
@@ -61,6 +65,7 @@ class ZE08:
         self.buf = bytearray()
         self.ppb = None
         self.ugm3 = None
+        self.mode = None          # "active" (0x17) 或 "qa" (0x86)
         self.last_rx_ms = None
         self.frames = 0
         self.bad_frames = 0
@@ -72,6 +77,7 @@ class ZE08:
         self.buf = bytearray()
         self.ppb = None
         self.ugm3 = None
+        self.mode = None
         self.last_rx_ms = None
         self.frames = 0
         self.bad_frames = 0
@@ -98,14 +104,22 @@ class ZE08:
         b1 = frame[1]
         if b1 == 0x17:
             # 主动上传: 浓度在 Byte4/Byte5, 单位 ppb
+            self.mode = "active"
             self.ppb = (frame[4] << 8) | frame[5]
-            self.ugm3 = self.ppb * PPB_TO_MG
+            if self.ppb > _MAX_PPB:
+                self.ppb = _MAX_PPB
+            self.ugm3 = self.ppb * PPB_TO_UGM3
         elif b1 == 0x86:
             # 问答应答: Byte2/3 是 ug/m3, Byte6/7 是 ppb
+            self.mode = "qa"
             self.ugm3 = (frame[2] << 8) | frame[3]
+            if self.ugm3 > _MAX_PPB * PPB_TO_UGM3:
+                self.ugm3 = _MAX_PPB * PPB_TO_UGM3
             self.ppb = (frame[6] << 8) | frame[7]
             if self.ppb == 0 and self.ugm3:
-                self.ppb = int(self.ugm3 / 1.25)
+                self.ppb = int(self.ugm3 / PPB_TO_UGM3)
+            if self.ppb > _MAX_PPB:
+                self.ppb = _MAX_PPB
         else:
             return False
         self.frames += 1

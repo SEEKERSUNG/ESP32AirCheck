@@ -12,6 +12,8 @@
   4. 报警判定不能依赖屏幕刷新(OLED 没接也要能报警)
   5. 总线恢复失败时要保留上次地址, 下一轮扫描继续重试
   6. 10 秒无操作熄屏; 按键只唤醒, 不翻页
+  7. ZE08 问答模式必须周期请求, 否则 5 秒后就掉线
+  8. 警告阈值和报警阈值的关系
 """
 
 import time
@@ -19,6 +21,7 @@ import time
 import config as cfg
 import main
 import sensors
+import ze08
 from ui import ST_PROBE, ST_ABSENT, ST_WARMUP, ST_READY
 
 FAILS = []
@@ -67,6 +70,44 @@ class FakeUART:
 
     def write(self, b):
         return len(b)
+
+
+def qa_frame(ugm3, ppb):
+    f = bytearray(b"\xff\x86\x00\x00\x00\x00\x00\x00\x00")
+    f[2] = (ugm3 >> 8) & 0xFF
+    f[3] = ugm3 & 0xFF
+    f[6] = (ppb >> 8) & 0xFF
+    f[7] = ppb & 0xFF
+    f[8] = ze08.checksum(f)
+    return bytes(f)
+
+
+class FakeQaUART:
+    """只在收到 0x86 读命令时回一帧, 模拟问答模式。"""
+
+    def __init__(self):
+        self.rx = bytearray()
+        self.requests = 0
+
+    def write(self, data):
+        if data == ze08.CMD_READ_QA:
+            self.requests += 1
+            self.rx.extend(qa_frame(40, 32))
+        return len(data)
+
+    def any(self):
+        return len(self.rx)
+
+    def read(self, n=None):
+        if not self.rx:
+            return None
+        if n is None or n >= len(self.rx):
+            chunk = bytes(self.rx)
+            self.rx = bytearray()
+            return chunk
+        chunk = bytes(self.rx[:n])
+        self.rx = self.rx[n:]
+        return chunk
 
 
 # ---------------------------------------------------------------- 1
@@ -138,6 +179,28 @@ check(mgr.any_alarm(), "甲醛超阈值 -> any_alarm() = True")
 mgr.values["hcho_mg"] = None
 check(not mgr.any_alarm(), "甲醛无数据 -> any_alarm() = False")
 
+# ---------------------------------------------------------------- 5b
+print()
+print("=== 5b. 警告阈值: 警告不报警, 超过报警线两者都置位 ===")
+mgr.values["tvoc"] = cfg.TVOC_WARN + 1
+check(mgr.snapshot()["warn"]["sgp40"] and not mgr.alarm["sgp40"],
+      "TVOC 在警告区 -> 警告, 不报警")
+mgr.values["tvoc"] = cfg.TVOC_ALARM + 1
+snap = mgr.snapshot()
+check(snap["warn"]["sgp40"] and snap["alarm"]["sgp40"],
+      "TVOC 超报警线 -> 警告和报警都置位")
+mgr.values["tvoc"] = None
+
+mgr.values["hcho_mg"] = cfg.HCHO_WARN + 0.005
+snap = mgr.snapshot()
+check(snap["warn"]["ze08"] and not snap["alarm"]["ze08"],
+      "HCHO 在警告区 -> 警告, 不报警")
+mgr.values["hcho_mg"] = cfg.HCHO_ALARM + 0.01
+snap = mgr.snapshot()
+check(snap["warn"]["ze08"] and snap["alarm"]["ze08"],
+      "HCHO 超报警线 -> 警告和报警都置位")
+mgr.values["hcho_mg"] = None
+
 # ---------------------------------------------------------------- 6
 print()
 print("=== 6. 总线恢复失败时要保留上次地址, 下一轮继续重试 ===")
@@ -203,6 +266,26 @@ check(app._screen_on and view.on == 1 and view.pages == 0,
 
 app._on_button_press(now + cfg.SCREEN_OFF_MS + 2)
 check(view.pages == 1, "再按一次才翻页")
+
+# ---------------------------------------------------------------- 8
+print()
+print("=== 8. ZE08 问答模式: 周期请求, 超过 5 秒仍保持在线 ===")
+qa_uart = FakeQaUART()
+qm = sensors.SensorManager(FakeI2C(), qa_uart, oled_ok=False)
+qm.ch["ze08"].warmup_s = 1          # 缩短预热, 让测试跑得快一点
+t0 = time.ticks_ms()
+while time.ticks_diff(time.ticks_ms(), t0) < 7000:
+    qm._step_ze08()
+    time.sleep_ms(100)
+
+check(qm.ch["ze08"].state == ST_READY,
+      "ZE08 状态 = %s (期望 READY)" % qm.ch["ze08"].state)
+check(qm.values["hcho_ppb"] == 32,
+      "HCHO 持续更新 = %r" % qm.values["hcho_ppb"])
+check(qa_uart.requests >= 5,
+      "问答请求次数 = %d (期望 >= 5)" % qa_uart.requests)
+check(qm.info["ze08_frames"] >= 5,
+      "有效帧数 = %d (期望 >= 5)" % qm.info["ze08_frames"])
 
 # ---------------------------------------------------------------- 汇总
 print()

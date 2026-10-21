@@ -110,6 +110,16 @@ class SHT40:
         return t, rh
 
     def heater_200mw_1s(self):
-        """片上加热器 200mW 1s(用于除凝露), 之后需重新 measure()。"""
+        """片上加热器 200mW 1s(用于除凝露), 返回加热结束后的 (温度, 湿度)。"""
         self._cmd(_CMD_HEATER_200MW_1S)
-        sleep_ms(1100)
+        sleep_ms(1200)                  # 数据手册 t_heater 最大 1.19s
+        t_raw, rh_raw = self._read_check(2)
+        t = -45.0 + 175.0 * t_raw / 65535.0
+        rh = -6.0 + 125.0 * rh_raw / 65535.0
+        if rh < 0.0:
+            rh = 0.0
+        elif rh > 100.0:
+            rh = 100.0
+        self.temperature = t
+        self.humidity = rh
+        return t, rh

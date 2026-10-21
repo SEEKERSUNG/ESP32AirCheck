@@ -7,7 +7,8 @@ ZE08 帧解析回归测试 (跑在开发板上, 用假 UART, 不需要真的接�
     CPython 的 bytearray 支持 del buf[i], 但 MicroPython 不支持。
     只靠电脑上的 py_compile / 主机测试发现不了这种差异, 必须让真正的
     MicroPython 去执行解析逻辑。本测试覆盖:
-        正常帧 / 问答帧 / 前面有垃圾字节 / 超长垃圾(考验缓冲区回收) / 校验错
+        正常帧 / 问答帧 / 模式标记 / 主动/问答单位换算 / 超量程限幅 /
+        前面有垃圾字节 / 超长垃圾(考验缓冲区回收) / 校验错
 """
 
 import ze08
@@ -43,7 +44,8 @@ class FakeUART:
 
 def active_frame(ppb):
     """主动上传帧: FF 17 04 00 <ppbHi> <ppbLo> <rngHi> <rngLo> <ck>"""
-    f = bytearray(b"\xff\x17\x04\x00\x00\x00\x00\x03\x00")
+    # 量程字段用手册示例 0x1388 (5000)
+    f = bytearray(b"\xff\x17\x04\x00\x00\x00\x13\x88\x00")
     f[4] = (ppb >> 8) & 0xFF
     f[5] = ppb & 0xFF
     f[8] = ze08.checksum(f)
@@ -81,7 +83,9 @@ z = new_sensor()
 z.uart.feed(active_frame(200))
 ppb = z.poll()
 check("主动帧: 返回浓度", ppb == 200, "got %r" % ppb)
-check("主动帧: 单位换算", abs(z.mgm3 - 0.25) < 1e-9, "got %r" % z.mgm3)
+check("主动帧: 模式标记", z.mode == "active", "got %r" % z.mode)
+check("主动帧: ug/m3 换算", abs(z.ugm3 - 250.0) < 1e-9, "got %r" % z.ugm3)
+check("主动帧: mg/m3 换算", abs(z.mgm3 - 0.25) < 1e-9, "got %r" % z.mgm3)
 check("主动帧: 计数 +1", z.frames == 1 and z.bad_frames == 0)
 check("主动帧: 缓冲区清空", len(z.buf) == 0)
 
@@ -90,7 +94,16 @@ z = new_sensor()
 z.uart.feed(qa_frame(400, 320))
 ppb = z.poll()
 check("问答帧: 返回 ppb", ppb == 320, "got %r" % ppb)
+check("问答帧: 模式标记", z.mode == "qa", "got %r" % z.mode)
 check("问答帧: ug/m3", z.ugm3 == 400, "got %r" % z.ugm3)
+# MicroPython 是 float32, 0.4 不能精确表示; 用 1e-6 容差
+check("问答帧: mg/m3", abs(z.mgm3 - 0.4) < 1e-6, "got %r" % z.mgm3)
+
+# ---- 2b. 问答帧只给 ug/m3 时回退换算 ppb ----
+z = new_sensor()
+z.uart.feed(qa_frame(40, 0))
+ppb = z.poll()
+check("问答帧回退: ppb", ppb == 32, "got %r" % ppb)
 
 # ---- 3. 前面有垃圾字节, 仍然要能找回帧 ----
 z = new_sensor()
@@ -140,7 +153,14 @@ check("分包: 第二段拼出完整帧", z.poll() == 456)
 # ---- 8. reset() 清空统计 ----
 z.reset()
 check("reset: 清空缓冲区", len(z.buf) == 0 and z.frames == 0
-      and z.bad_frames == 0 and z.ppb is None)
+      and z.bad_frames == 0 and z.ppb is None and z.mode is None)
+
+# ---- 9. 超出量程的数据按 5000 ppb 限幅 ----
+z = new_sensor()
+z.uart.feed(active_frame(6000))
+ppb = z.poll()
+check("超量程: 限幅到 5000 ppb", ppb == 5000, "got %r" % ppb)
+check("超量程: mg/m3 限幅", abs(z.mgm3 - 6.25) < 1e-9, "got %r" % z.mgm3)
 
 print()
 if _fails:

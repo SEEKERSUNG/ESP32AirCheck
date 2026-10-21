@@ -88,7 +88,10 @@ class SGP40:
             return False
 
     def soft_reset(self):
-        self._send(_CMD_SOFT_RESET)
+        # SGP40 的软复位是 general call(地址 0x00) + 命令 0x0006。
+        # 注意 general call 会同时复位总线上其他支持该命令的器件,
+        # 本项目主程序没有调用它。
+        self.i2c.writeto(0x00, b"\x00\x06")
         sleep_ms(20)
 
     def self_test(self):
