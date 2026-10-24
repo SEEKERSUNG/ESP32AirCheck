@@ -95,6 +95,9 @@ BUTTON_ENABLED = True           # 接一个按键到 GND, 用于翻页/消音
 # 注意: GPIO0 是启动模式选择脚, 上电/复位那一刻不能按住,
 #       否则 ESP32 会进下载模式而不是运行程序。
 BUTTON_PIN = 0                  # 内部上拉, 按下为低电平
+# 长按 BOOT 键多久触发“重新学习 VOC 基线”(毫秒)
+# 短按仍然是翻页/唤醒; 设为 0 关闭长按功能
+VOC_RESET_HOLD_MS = 3000
 
 BUZZER_ENABLED = False          # 有源蜂鸣器, 报警时鸣叫
 BUZZER_PIN = 25

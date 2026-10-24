@@ -34,6 +34,7 @@
 | 基线持久化 | VOC 基线每 10 分钟存入 ESP32 NVS，断电重启后继续学习 |
 | 三页界面 | 主界面 / 运行信息 / 原始数据，按键切换 |
 | 自动息屏 | 10 秒无操作关屏，按 BOOT 键唤醒（唤醒那次不翻页） |
+| 长按重置基线 | 长按 BOOT 3 秒清除 VOC 学习状态，以当前环境重新学习 |
 | 中文字库 | 16×16 点阵，由 `tools/gen_font.py` 从系统字体自动生成 |
 | 警告/报警 | 警告显示 `!`；报警显示闪烁 `*` + 板载 LED 快闪 +（可选）蜂鸣器鸣叫 |
 
@@ -48,7 +49,7 @@
 | 温湿度 | SHT40 | I2C @ 0x44 | 3.3V |
 | 甲醛 | ZE08-CH2O（炜盛） | UART 9600 8N1 | **需要 5V 供电**，信号是 3V TTL |
 | VOC 指数 | SGP40 | I2C @ 0x59 | 3.3V，需配合 VOC 算法才能得到指数 |
-| 按键 | 板上自带 **BOOT** 键（可选） | GPIO0 → GND | 内部上拉，用于翻页 |
+| 按键 | 板上自带 **BOOT** 键（可选） | GPIO0 → GND | 内部上拉，短按翻页/唤醒，长按 3 秒重置 VOC 基线 |
 | 指示灯 | 板载蓝色 LED（可选） | GPIO2 | 高电平点亮 |
 | 蜂鸣器 | 有源蜂鸣器（可选） | GPIO25 | 默认关闭 |
 
@@ -99,7 +100,7 @@ OLED、SHT40、SGP40 的地址各不相同（0x3C / 0x44 / 0x59），
 | 功能 | ESP32 引脚 | 接法 | 默认 |
 |------|-----------|------|------|
 | 状态指示灯 | **GPIO2** | 板载 LED，高电平点亮 | 开启（`STATUS_LED = 2`） |
-| 翻页/唤醒按键 | **GPIO0** | 板上自带的 BOOT 键（一端 GPIO0，一端 GND），内部上拉 | 开启 |
+| 翻页/唤醒/长按重置按键 | **GPIO0** | 板上自带的 BOOT 键（一端 GPIO0，一端 GND），内部上拉 | 开启 |
 | 蜂鸣器 | **GPIO25** | 有源蜂鸣器正极接 GPIO25，负极接 GND | **关闭**（`BUZZER_ENABLED = False`） |
 
 ### 3.5 接线总览（ASCII 图）
@@ -211,7 +212,7 @@ ESP32AirCheck/
         ├── test_ze08.py      ZE08 单测(真串口)
         ├── test_ze08_parse.py ZE08 帧解析回归测试(假串口, 不需要接线)
         ├── test_voc_state.py VOC 基线持久化回归测试(独立 NVS, 不影响主状态)
-        └── test_state_machine.py 状态机/报警/总线恢复/息屏/ZE08问答回归测试
+        └── test_state_machine.py 状态机/报警/总线恢复/息屏/ZE08问答/长按重置回归测试
 ```
 
 ---
@@ -264,7 +265,7 @@ python tools/deploy.py run test_sgp40
 python tools/deploy.py run test_ze08
 python tools/deploy.py run test_ze08_parse  # ZE08 解析回归测试(不用接传感器)
 python tools/deploy.py run test_voc_state    # VOC 基线保存/恢复回归测试
-python tools/deploy.py run test_state_machine  # 状态机/报警/总线恢复/息屏/ZE08问答回归测试
+python tools/deploy.py run test_state_machine  # 状态机/报警/总线恢复/息屏/ZE08问答/长按重置回归测试
 
 # 界面排版测试：自动跑测试并把画面渲染成 PNG，不用接屏幕
 python tools/layout_preview.py            # 生成 tools/ui_layout.png
@@ -307,6 +308,11 @@ python tools/gen_font.py --preview   # 顺便输出预览图，肉眼确认没�
 只唤醒、不翻页，再按才切换页面。关屏只是关闭显示，采集、报警、LED 和蜂鸣器
 都继续工作；把 `SCREEN_OFF_MS` 设为 0 可以关闭这个功能。如果关掉了按键
 （`BUTTON_ENABLED = False`），息屏也会自动不生效，避免屏幕黑了无法唤醒。
+
+**长按 BOOT 键 3 秒**会清除 VOC 算法状态和已保存的基线，让 SGP40 以当前空气
+重新学习（`VOC_RESET_HOLD_MS` 可调，设为 0 关闭）。重置后 TVOC 先显示 `----`，
+第 2 页 SGP40 显示 `WARM`，约 45 秒 blackout + 60 秒预热后重新出数。短按仍然
+只翻页/唤醒，不会误触发重置。
 
 ### 第 1 页：主界面
 
@@ -401,7 +407,7 @@ ZE08 单独用 100ms 的任务刷串口缓冲，防止接收缓冲溢出丢帧�
 | 传感器 | 预热 | 依据 |
 |--------|------|------|
 | SHT40 | 1 秒 | 上电后第一次测量即可用，几乎不需要预热 |
-| SGP40 | 60 秒 | 算法前 45 秒是 blackout 期；完全收敛需要约 1 小时 |
+| SGP40 | 60 秒 | 算法前 45 秒是 blackout 期；均值/方差时间常数约 12 小时，之后才完全收敛 |
 | ZE08 | 180 秒 | 数据手册标明预热时间 ≤ 3 分钟；首次上电还需 24~48 小时充分稳定 |
 
 **预热期间第 2 页状态显示 `WARM`，并且不参与警告/报警判定** ——
@@ -518,9 +524,9 @@ VOC 算法的基线（均值、方差、低通、gating）跑在 **ESP32** 上�
 * Sensirion 官方建议 `get_states/set_states` 只在连续运行 ≥3 小时、中断 ≤10 分钟时
   使用；本项目为了桌面使用从启动 10 分钟起就保存，长期断电后请按下面的方法清除；
 * 长时间断电后环境可能完全变化，或者更换了 SGP40 模块，旧基线未必合适；
-* 想强制重新学习：在 REPL 执行 `import sensors; sensors._erase_state()`，
-  然后复位/重启；只把 `VOC_STATE_PERSIST` 改成 `False` 只是本次不读不写，
-  旧状态还在；
+* 想强制重新学习：**长按 BOOT 键 3 秒**（`VOC_RESET_HOLD_MS`）；或在 REPL 执行
+  `import sensors; sensors._erase_state()` 后复位/重启。只把 `VOC_STATE_PERSIST`
+  改成 `False` 只是本次不读不写，旧状态还在；
 * NVS 有磨损均衡和掉电保护，10 分钟一次约 5 万次/年；如果 NVS 不可用，
   会自动退回写板上的 `/voc_state.json`（临时文件 + 改名，避免写一半掉电）。
 
@@ -609,6 +615,20 @@ python tools/deploy.py run test_i2c
 默认不用。VOC 基线每 10 分钟保存在 ESP32 的 NVS 里，上电时自动恢复（见
 [7.8](#78-断电后保留-voc-基线)）。只有第一次运行、手动清除了状态、或者保存的
 状态与当前算法不兼容时才会从零学习。恢复的只是算法基线，SGP40 本身仍要正常预热。
+
+### VOC 指数为什么长时间不是 100
+
+`100` 是算法**学到的当前环境基线**，不是固定目标值。SGP40 的均值/方差时间常数
+约 12 小时，所以：
+
+* 刚上电/刚重置时，前 45 分钟学习较快，指数会很快接近 100；
+* 之后基线继续慢慢收敛，完全稳定大约要 12 小时；
+* 空气比基线干净时指数 <100，比基线差时 >100；
+* 搬动位置或断电后恢复了旧环境的基线，指数可能长时间偏离 100。
+
+想立刻以当前空气为新基线：**长按 BOOT 键 3 秒**（会清除旧基线并自动重新学习），
+或在 REPL 执行 `import sensors; sensors._erase_state()` 后复位。这样会清除旧基线，
+重新从当前环境开始学习（前 45 分钟会快速收敛）。
 
 ### 汉字显示成乱码 / 左右错位
 
@@ -878,6 +898,7 @@ SGP40 只负责输出原始值，VOC 算法（含基线）跑在 ESP32 上；SGP
 | `ZE08_RX` | `16` | ESP32 ← ZE08 TXD |
 | `STATUS_LED` | `2` | 板载 LED，`None` 表示不用 |
 | `BUTTON_PIN` | `0` | 翻页按键（板上 BOOT 键） |
+| `VOC_RESET_HOLD_MS` | `3000` | 长按 BOOT 重置 VOC 基线的时间；`0` 关闭 |
 | `BUZZER_PIN` | `25` | 蜂鸣器，默认 `BUZZER_ENABLED = False` |
 | `*_ENABLED` | `True` | `SHT40_ENABLED` / `SGP40_ENABLED` / `ZE08_ENABLED`，关掉后该行隐藏，第 2 页显示 `OFF` |
 | `WARMUP_*` | 1/60/180 | SHT40 / SGP40 / ZE08 的预热秒数 |

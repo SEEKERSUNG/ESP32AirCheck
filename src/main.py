@@ -48,6 +48,8 @@ class App:
         self.button = None
         self._btn_last = 1
         self._btn_ms = 0
+        self._btn_down_ms = None
+        self._btn_long_done = False
         self._ui_fails = 0
         self._screen_on = True
         self._last_activity = ticks_ms()
@@ -154,6 +156,48 @@ class App:
             self.view.next_page()
             log("[ui] 切换到第 %d 页" % (self.view.page + 1))
 
+    def _on_long_press(self, now):
+        """长按 BOOT: 清除 VOC 基线, 从当前环境重新学习。"""
+        self._last_activity = now
+        if self.view is not None and not self._screen_on:
+            if self.view.screen_on():
+                self._screen_on = True
+        if self.mgr is not None:
+            try:
+                self.mgr.reset_voc_baseline(now)
+            except Exception as e:
+                log("[voc] 重置基线失败:", e)
+        log("[ui] 长按 BOOT: 重新学习 VOC 基线")
+
+    def _button_tick(self, v, now):
+        """处理一次按键采样: 短按翻页/唤醒, 长按重置 VOC 基线。"""
+        if self._btn_last == 1 and v == 0:
+            # 按下: 等松手再判断短按/长按
+            if ticks_diff(now, self._btn_ms) > 250:
+                self._btn_ms = now
+                self._btn_down_ms = now
+                self._btn_long_done = False
+        elif self._btn_last == 0 and v == 1:
+            # 松开
+            if self._btn_down_ms is not None:
+                held = ticks_diff(now, self._btn_down_ms)
+                if not self._btn_long_done:
+                    if cfg.VOC_RESET_HOLD_MS > 0 and \
+                            held >= cfg.VOC_RESET_HOLD_MS:
+                        self._on_long_press(now)
+                    elif held >= 50:            # 过滤机械抖动
+                        self._on_button_press(now)
+                self._btn_down_ms = None
+                self._btn_long_done = False
+
+        # 按住不放: 到时间直接触发, 不必等松手
+        if v == 0 and self._btn_down_ms is not None \
+                and not self._btn_long_done and cfg.VOC_RESET_HOLD_MS > 0:
+            if ticks_diff(now, self._btn_down_ms) >= cfg.VOC_RESET_HOLD_MS:
+                self._btn_long_done = True
+                self._on_long_press(now)
+        self._btn_last = v
+
     # ------------------------------------------------------------------
     # 任务: I2C 三个传感器
     # ------------------------------------------------------------------
@@ -215,13 +259,7 @@ class App:
             return
         while True:
             try:
-                v = self.button.value()
-                now = ticks_ms()
-                if self._btn_last == 1 and v == 0 and \
-                        ticks_diff(now, self._btn_ms) > 250:
-                    self._btn_ms = now
-                    self._on_button_press(now)
-                self._btn_last = v
+                self._button_tick(self.button.value(), ticks_ms())
             except Exception:
                 pass
             await asyncio.sleep_ms(30)

@@ -14,6 +14,7 @@
   6. 10 秒无操作熄屏; 按键只唤醒, 不翻页
   7. ZE08 问答模式必须周期请求, 否则 5 秒后就掉线
   8. 警告阈值和报警阈值的关系
+  9. 长按 BOOT 重置 VOC 基线, 短按仍然翻页
 """
 
 import time
@@ -286,6 +287,60 @@ check(qa_uart.requests >= 5,
       "问答请求次数 = %d (期望 >= 5)" % qa_uart.requests)
 check(qm.info["ze08_frames"] >= 5,
       "有效帧数 = %d (期望 >= 5)" % qm.info["ze08_frames"])
+
+# ---------------------------------------------------------------- 9
+print()
+print("=== 9. 长按 BOOT 重置 VOC 基线, 短按仍然翻页 ===")
+
+
+class FakeMgr:
+    def __init__(self):
+        self.resets = 0
+
+    def reset_voc_baseline(self, now):
+        self.resets += 1
+
+
+app = main.App()
+view = FakeView()
+fake_mgr = FakeMgr()
+app.view = view
+app.mgr = fake_mgr
+app._btn_last = 1
+app._btn_ms = 0
+
+app._button_tick(0, 1000)                           # 按下
+app._button_tick(0, 1000 + cfg.VOC_RESET_HOLD_MS - 1)
+check(fake_mgr.resets == 0 and view.pages == 0,
+      "未到长按时间不重置")
+
+app._button_tick(0, 1000 + cfg.VOC_RESET_HOLD_MS)   # 按住到阈值
+check(fake_mgr.resets == 1, "长按满 %dms 触发重置" % cfg.VOC_RESET_HOLD_MS)
+
+app._button_tick(1, 1000 + cfg.VOC_RESET_HOLD_MS + 100)
+check(view.pages == 0, "长按释放不翻页")
+
+app2 = main.App()
+view2 = FakeView()
+fake_mgr2 = FakeMgr()
+app2.view = view2
+app2.mgr = fake_mgr2
+app2._btn_last = 1
+app2._btn_ms = 0
+app2._button_tick(0, 1000)
+app2._button_tick(1, 1100)                          # 短按 100ms
+check(view2.pages == 1 and fake_mgr2.resets == 0,
+      "短按仍然翻页, 不重置基线")
+
+# 重置算法本身
+m = sensors.SensorManager(FakeI2C(), FakeUART(), oled_ok=False)
+m.drv_sgp = object()
+m.ch["sgp40"].state = ST_READY
+m.values["tvoc"] = 123
+m.reset_voc_baseline(1000, erase=False)
+check(m.values["tvoc"] is None, "重置后 TVOC 显示值清空")
+check(m.ch["sgp40"].state == ST_WARMUP, "重置后 SGP40 回到 WARMUP")
+check(m.algo.mUptime == 0, "重置后算法从头开始")
 
 # ---------------------------------------------------------------- 汇总
 print()

@@ -537,6 +537,27 @@ class SensorManager:
             print("[ZE08] 预热完成")
 
     # ==================== VOC 基线持久化 ====================
+    def reset_voc_baseline(self, now, erase=True):
+        """清除 VOC 算法状态和已保存基线, 以当前环境重新学习。
+
+        长按 BOOT 时调用; erase=False 只重置内存状态(测试用)。
+        """
+        self.algo = voc.VocAlgorithm()
+        self.values["tvoc"] = None
+        self.info["voc_raw"] = 0
+        self.info["voc_uptime"] = 0
+        self.info["voc_learning"] = False
+        if erase:
+            _erase_state()
+        self._voc_save_ms = now
+        self._sgp_learn_ms = now
+        ch = self.ch["sgp40"]
+        # 只有 SGP40 确实在线时才进入预热; 没接上时等它重新连接后自然开始学习
+        if ch.enabled and self.drv_sgp is not None \
+                and ch.state in (ST_READY, ST_WARMUP):
+            ch.begin_warmup(now)
+        print("[voc] 已清除基线, 重新学习")
+
     def _restore_voc_state(self):
         """SGP40 连接时调用; 找到有效状态就恢复, 否则返回 False。"""
         blob = _load_state_blob()
