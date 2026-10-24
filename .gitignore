@@ -1,3 +1,6 @@
 # Python
 __pycache__/
 *.py[cod]
+
+# 本地 Wi-Fi / MQTT 凭据, 不要提交
+src/secrets.py

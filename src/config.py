@@ -158,3 +158,26 @@ RESCAN_MS = 10000
 
 # LED / 蜂鸣器
 LED_HEARTBEAT_MS = 2000
+
+# --------------------------------------------------------------------------
+# 10. Wi-Fi / Home Assistant MQTT (可选)
+# --------------------------------------------------------------------------
+# 真实凭据放在 src/secrets.py (已被 .gitignore 忽略), 不要写进本文件。
+# 留空则完全不启用网络, 不影响本地采集和屏幕。
+try:
+    from secrets import (WIFI_SSID, WIFI_PASSWORD, MQTT_HOST, MQTT_PORT,
+                         MQTT_USER, MQTT_PASSWORD)
+except ImportError:
+    WIFI_SSID = ""
+    WIFI_PASSWORD = ""
+    MQTT_HOST = ""
+    MQTT_PORT = 1883
+    MQTT_USER = ""
+    MQTT_PASSWORD = ""
+
+MQTT_BASE = "esp32aircheck"     # 主题前缀, 后面会拼设备 MAC
+MQTT_PUBLISH_MS = 10000         # 状态发布周期 (毫秒)
+MQTT_KEEPALIVE = 60
+HA_DISCOVERY = True             # 自动发布 Home Assistant MQTT Discovery
+HA_DISCOVERY_PREFIX = "homeassistant"
+DEVICE_NAME = "ESP32 AirCheck"

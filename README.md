@@ -18,6 +18,7 @@
 8. [报警阈值](#8-报警阈值)
 9. [常见问题](#9-常见问题)
 10. [开发笔记](#10-开发笔记)
+11. [接入 Home Assistant (MQTT)](#11-接入-home-assistant-mqtt)
 
 ---
 
@@ -35,6 +36,7 @@
 | 三页界面 | 主界面 / 运行信息 / 原始数据，按键切换 |
 | 自动息屏 | 10 秒无操作关屏，按 BOOT 键唤醒（唤醒那次不翻页） |
 | 长按重置基线 | 长按 BOOT 3 秒清除 VOC 学习状态，以当前环境重新学习 |
+| Home Assistant | 可选 Wi-Fi + MQTT Discovery，自动生成温度/湿度/甲醛/VOC/报警实体 |
 | 中文字库 | 16×16 点阵，由 `tools/gen_font.py` 从系统字体自动生成 |
 | 警告/报警 | 警告显示 `!`；报警显示闪烁 `*` + 板载 LED 快闪 +（可选）蜂鸣器鸣叫 |
 
@@ -185,10 +187,12 @@ ESP32AirCheck/
 │   ├── boot.py               开机引导(执行 main.py 之前)
 │   ├── main.py               主程序: asyncio 任务调度
 │   ├── config.py             ★ 所有可配置项都在这里(引脚/地址/阈值/预热时间)
+│   ├── secrets.py            本地 Wi-Fi/MQTT 凭据(被 .gitignore 忽略)
 │   ├── sensors.py            传感器状态机: 探测 / 预热 / 采集 / 热插拔
 │   ├── ui.py                 屏幕渲染(三页界面 + 中英文混排)
 │   ├── cfont.py              16×16 中文字库(自动生成)
 │   ├── voc.py                Sensirion VOC 指数算法(C 代码的 Python 移植)
+│   ├── net.py                Wi-Fi / MQTT / Home Assistant Discovery
 │   ├── sht40.py              SHT40 驱动
 │   ├── sgp40.py              SGP40 驱动
 │   ├── ze08.py               ZE08-CH2O 驱动
@@ -201,6 +205,7 @@ ESP32AirCheck/
     ├── backup/               上传前的板上文件备份
     ├── host_tests/
     │   ├── test_voc.py       VOC 算法回归测试(纯 PC 上跑)
+    │   ├── test_net.py       Home Assistant Discovery JSON/主题测试(不联网)
     │   ├── run_board_test.py 在 PC 上跑开发板测试(带 machine/framebuf 垫片)
     │   └── mpstub/           MicroPython 模块的最小替身
     └── tests/                在开发板上跑的硬件测试
@@ -272,6 +277,7 @@ python tools/layout_preview.py            # 生成 tools/ui_layout.png
 
 # 纯 PC 端测试
 python tools/host_tests/test_voc.py       # VOC 算法/基线状态回归测试
+python tools/host_tests/test_net.py       # Home Assistant Discovery JSON/主题测试
 python tools/host_tests/run_board_test.py tools/tests/test_state_machine.py
                                           # 同一份状态机测试, 不插板子也能跑
 ```
@@ -882,6 +888,96 @@ SGP40 只负责输出原始值，VOC 算法（含基线）跑在 ESP32 上；SGP
 
 ---
 
+## 11. 接入 Home Assistant (MQTT)
+
+米家是封闭生态，DIY ESP32 不能直接变成米家原生设备；本项目选择 Home Assistant
+本地接入。HA 的 MQTT Discovery 会自动创建设备和实体，不需要手写
+`configuration.yaml`。
+
+### 11.1 准备
+
+* HA 已安装并配置 MQTT 集成，Mosquitto / MQTT broker 可从局域网访问（默认 1883）。
+* ESP32 和 HA 在同一个 Wi-Fi 网段。
+* 板子固件包含 `umqtt.simple`。当前板子已确认有；如果提示缺少：
+
+  ```powershell
+  python -m mpremote connect COM9 mip install umqtt.simple
+  ```
+
+### 11.2 填凭据（不要提交）
+
+`src/secrets.py` 已被 `.gitignore` 忽略，填 Wi-Fi 和 MQTT。如果从 git 重新
+clone 后没有这个文件，新建一个同名文件即可（不要提交）：
+
+```python
+WIFI_SSID = "..."
+WIFI_PASSWORD = "..."
+MQTT_HOST = "192.168.1.10"      # HA/Mosquitto 的局域网地址
+MQTT_PORT = 1883
+MQTT_USER = "..."
+MQTT_PASSWORD = "..."
+```
+
+`MQTT_USER/PASSWORD` 留空表示匿名连接（取决于 broker 配置）。`WIFI_SSID` 或
+`MQTT_HOST` 留空时网络功能完全关闭，本地采集、屏幕、按键都不受影响。
+
+### 11.3 部署与发现
+
+```powershell
+python tools/deploy.py
+```
+
+`deploy.py` 会把 `secrets.py` 一起上传（它只被 git 忽略，不会被跳过）。
+复位后串口应出现：
+
+```
+[net] Wi-Fi 已连接: 192.168.x.x
+[net] MQTT 已连接
+[net] HA discovery 已发布
+```
+
+HA 的 MQTT 集成会自动出现设备 **ESP32 AirCheck**，包含：
+
+| 实体 | 单位 |
+|------|------|
+| 温度 | °C |
+| 湿度 | % |
+| 甲醛 | mg/m³ |
+| VOC 指数 | idx |
+| 空气质量报警 | ON / OFF（binary_sensor） |
+
+### 11.4 主题与配置
+
+设备 ID 使用 ESP32 的 MAC：
+
+| 用途 | Topic |
+|------|-------|
+| 状态 JSON | `esp32aircheck/<mac>/state` |
+| 在线状态 | `esp32aircheck/<mac>/availability` |
+| Discovery | `homeassistant/sensor/esp32aircheck_<mac>_.../config` |
+
+状态 JSON 字段：`temp`、`rh`、`hcho`、`voc`、`alarm`、`uptime`。
+状态和 Discovery 配置都是 retained；掉线时 broker 会发布 `offline`（Last Will）。
+
+可在 `config.py` 调整：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `MQTT_BASE` | `"esp32aircheck"` | 主题前缀 |
+| `MQTT_PUBLISH_MS` | `10000` | 状态发布周期 |
+| `HA_DISCOVERY` | `True` | 是否自动发布 Discovery |
+| `HA_DISCOVERY_PREFIX` | `"homeassistant"` | HA Discovery 前缀 |
+| `DEVICE_NAME` | `"ESP32 AirCheck"` | HA 设备名 |
+
+默认使用 1883 明文 MQTT，不支持 TLS。HA 看不到设备时，先看串口 `[net]` 日志，
+再确认 MQTT 集成、broker 用户权限和 `MQTT_HOST` 是否为 HA 的局域网 IP。
+
+> 米家 App 原生卡片仍然做不到：米家需要认证模组/产品，HA 的米家集成只能把
+> 米家设备导入 HA，不能反向把 HA 设备导入米家。小爱同学可以通过云平台桥接，
+> 但通常不是米家原生设备。
+
+---
+
 ## 附：`config.py` 速查
 
 | 配置项 | 默认值 | 说明 |
@@ -907,3 +1003,8 @@ SGP40 只负责输出原始值，VOC 算法（含基线）跑在 ESP32 上；SGP
 | `RESCAN_MS` | `10000` | 热插拔重新探测周期 |
 | `HCHO_WARN/ALARM` | 0.08 / 0.10 | mg/m³，警告 / 报警 |
 | `TVOC_WARN/ALARM` | 150 / 250 | VOC 指数（界面标签 `VOC`），警告 / 报警 |
+| `WIFI_SSID/PASSWORD` | `src/secrets.py` | 留空关闭网络 |
+| `MQTT_HOST/PORT/USER/PASSWORD` | `src/secrets.py` | Home Assistant broker |
+| `MQTT_BASE` | `"esp32aircheck"` | MQTT 主题前缀 |
+| `MQTT_PUBLISH_MS` | `10000` | 状态发布周期 |
+| `HA_DISCOVERY` | `True` | Home Assistant 自动发现 |

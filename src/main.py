@@ -29,6 +29,7 @@ from machine import Pin, I2C, UART
 import config as cfg
 import ui
 import sensors
+import net
 
 
 def log(*args):
@@ -46,6 +47,7 @@ class App:
         self.led = None
         self.buzzer = None
         self.button = None
+        self.net = None
         self._btn_last = 1
         self._btn_ms = 0
         self._btn_down_ms = None
@@ -329,6 +331,8 @@ class App:
         # 开机画面/初始化不算用户操作, 从进入主循环开始计时
         self._last_activity = ticks_ms()
 
+        self.net = net.Net(self.mgr.snapshot, cfg.VERSION, log)
+
         await asyncio.gather(
             self.task_i2c(),
             self.task_ze08(),
@@ -336,6 +340,7 @@ class App:
             self.task_button(),
             self.task_led(),
             self.task_buzzer(),
+            self.net.run(),
         )
 
 
