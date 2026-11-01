@@ -1,16 +1,65 @@
 # ESP32AirCheck 外壳 3D 模型
 
-依据 `PCB/ESP32AirCheckAllInOnePCB/3D_PCB1_2026-10-26.step`、EasyEDA 工程文件
-`PCB/ESP32AirCheckAllInOnePCB/pcb/PCB1.epcb2` 中的孔位，以及**已焊好的实物板俯视照片**
-等比测算后建模。输出：底板 + 顶盖 + 2 个按钮柱，全部 M2 自攻固定。
+## 介绍
 
-## 文件清单
+这是 ESP32AirCheck 空气质量检测器的 3D 打印外壳，为已经焊好的
+`ESP32AirCheckAllInOnePCB` 量身定做。整机只有三个打印件：**底板、顶盖、两个按钮柱**，
+全部用 M2 自攻螺丝固定，不需要螺母，也不用二次加工。
+
+建模依据三份资料：PCB 的 3D 模型（`3D_PCB1_2026-10-26.step`，取外形与高度）、
+EasyEDA 工程文件（`PCB1.epcb2`，取 6 个安装孔和排针的精确坐标）、以及**已焊好的实物板俯视照片**
+（等比测量 OLED 与三个传感器的实际位置）。所有实测值都写进了 `generate_enclosure.py` 开头的参数区。
+
+### 设计目标
+
+- **紧凑**：PCB 下表面到顶盖下表面只有 **17 mm**，充电口顶部刚好顶到顶盖，其余元件各留 1–4 mm 余量。
+- **免支撑打印**：整壳没有需要支撑的悬空面。底板的 2 根上盖螺丝柱做成 45° 锥体 + 45° 斜肋；
+  顶盖外表面贴平台打印，唇边朝上。
+- **模块压紧**：顶盖内侧 4 个按压凸台正对排针，合盖后把 OLED 和三个传感器压住，震动不会脱出。
+- **气路独立**：三个传感器各有一片 Ø10 / Ø15 的圆阵网孔，孔 Ø1.6、开孔率约 20–24%，
+  通气足够又不会把顶盖削弱成薄片。
+- **装配可逆**：2 颗上盖螺丝 + 摩擦唇边固定，前壁留撬盖槽，反复拆装不伤壳体。
+- **全 M2 自攻**：PCB 6 颗、顶盖 2 颗，一共 8 颗，规格统一。
+
+### 一句话尺寸
+
+外形 **105.32 × 85.00 × 26.80 mm**，壁厚 2.40 mm，内腔 100.52 × 80.20 × 22.00 mm，
+PCB 抬高 5.00 mm，6 个 Ø5 支撑柱、2 个接缝螺丝柱、3 组网孔、1 个 OLED 窗口、2 个按钮孔。
+
+## 文件树
+
+```
+ESP32AirCheck/
+├─ src/                                   固件
+├─ tools/
+├─ 3Dmodel/                               ← 本目录
+│  ├─ ESP32AirCheck_enclosure_base.stl       底板（打印件）
+│  ├─ ESP32AirCheck_enclosure_lid.stl        顶盖（打印件）
+│  ├─ ESP32AirCheck_button.stl               按钮柱（打印 2 个）
+│  ├─ ESP32AirCheck.3mf                      切片工程，三件已摆盘
+│  ├─ ESP32AirCheck_enclosure.blend          可编辑模型（生成脚本的输出）
+│  ├─ ESP32AirCheck_preview.blend            预览场景，含 PCB / 模块示意体
+│  ├─ generate_enclosure.py                  参数化生成脚本
+│  ├─ render_preview.py                      预览图渲染脚本
+│  ├─ README.md                              本文件
+│  └─ preview_*.png                          5 张预览图
+└─ PCB/
+   └─ ESP32AirCheckAllInOnePCB/
+      ├─ 3D_PCB1_2026-10-26.step              PCB 3D 模型（高度基准）
+      ├─ ESP32AirCheckAllInOnePCB.eprj3       EasyEDA 工程
+      ├─ pcb/PCB1.epcb2                       PCB 源文件（孔位基准）
+      ├─ sch/Schematic1/                      原理图
+      └─ panel/Panel1.epan2                   拼板
+```
+
+## 文件说明
 
 | 文件 | 说明 |
 | --- | --- |
 | `ESP32AirCheck_enclosure_base.stl` | 底板（6 个 PCB 支撑柱、2 个上盖螺丝柱、充电口、撬盖槽） |
-| `ESP32AirCheck_enclosure_lid.stl` | 顶盖（OLED 窗口、3 组传感器网孔、按压凸台、2 螺丝孔、2 按钮孔） |
+| `ESP32AirCheck_enclosure_lid.stl` | 顶盖（OLED 窗口、3 组传感器网孔、4 个按压凸台、2 螺丝孔、2 按钮孔） |
 | `ESP32AirCheck_button.stl` | 按钮柱，**打印 2 个** |
+| `ESP32AirCheck.3mf` | 切片工程（Bambu Studio / OrcaSlicer），底板 + 顶盖 + 按钮已摆盘；工程里按钮只有 1 个实例，要打 2 个时复制一份 |
 | `ESP32AirCheck_enclosure.blend` | 可编辑模型 |
 | `ESP32AirCheck_preview.blend` | 预览场景（含 PCB 与模块示意体，不用于打印） |
 | `generate_enclosure.py` | 参数化生成脚本，关键尺寸集中在文件开头 |
