@@ -15,11 +15,13 @@
   7. ZE08 问答模式必须周期请求, 否则 5 秒后就掉线
   8. 警告阈值和报警阈值的关系
   9. 长按 BOOT 重置 VOC 基线, 短按仍然翻页
+ 10. 历史均值只统计预热完成的通道
 """
 
 import time
 
 import config as cfg
+import history
 import main
 import sensors
 import ze08
@@ -341,6 +343,32 @@ m.reset_voc_baseline(1000, erase=False)
 check(m.values["tvoc"] is None, "重置后 TVOC 显示值清空")
 check(m.ch["sgp40"].state == ST_WARMUP, "重置后 SGP40 回到 WARMUP")
 check(m.algo.mUptime == 0, "重置后算法从头开始")
+
+# ---------------------------------------------------------------- 10
+print("=== 10. 历史均值: 只统计预热完成的通道 ===")
+m = sensors.SensorManager(FakeI2C(), FakeUART(), oled_ok=False)
+# 换一个小的、不写 NVS 的 History, 免得测试动到板上的真实历史
+m.history = history.History(bucket_ms=1000, slots=8, save_ms=0,
+                            persist=False)
+m.values["temp"] = 25.0
+m.values["rh"] = 50.0
+m.values["hcho_mg"] = 0.04
+m.values["tvoc"] = 120
+
+for i in range(3):                       # 三个通道都还是 ABSENT
+    m.step_history(i * 1000)
+check(m.history.filled == 2, "未就绪时仍然按时间关桶")
+check(m.history.averages()["temp"]["3h"] is None, "未就绪的通道不参与均值")
+
+m.ch["sht40"].state = ST_READY           # 只有温湿度就绪
+for i in range(3, 6):
+    m.step_history(i * 1000)
+a = m.history.averages()
+check(abs(a["temp"]["3h"] - 25.0) < 1e-6, "就绪后温度进入均值")
+check(abs(a["rh"]["3h"] - 50.0) < 1e-6, "就绪后湿度进入均值")
+check(a["hcho"]["3h"] is None, "甲醛仍未就绪, 不进入均值")
+check(a["voc"]["3h"] is None, "VOC 仍未就绪, 不进入均值")
+check(m.snapshot()["history"] == a, "snapshot 里带上历史均值")
 
 # ---------------------------------------------------------------- 汇总
 print()

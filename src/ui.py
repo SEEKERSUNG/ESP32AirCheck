@@ -4,10 +4,11 @@ OLED 界面渲染
 ================================================================
 本模块只负责"把数据画到屏幕上", 不碰任何传感器, 方便单独调试界面。
 
-界面一共有 3 页(按键 GPIO0 循环切换):
+界面一共有 4 页(按键 GPIO0 循环切换):
     第 1 页 主界面   : 温湿度 / 甲醛 / TVOC (只显示读数, 不显示连接状态)
-    第 2 页 运行信息 : 各传感器在线状态 + 运行时间 (判断连接/预热/异常看这页)
-    第 3 页 原始数据 : VOC 原始值、串口收包统计等, 单独调传感器时用
+    第 2 页 历史均值 : 近 3 / 6 / 12 小时的平均值, 每 5 分钟更新一次
+    第 3 页 运行信息 : 各传感器在线状态 + 运行时间 (判断连接/预热/异常看这页)
+    第 4 页 原始数据 : VOC 原始值、串口收包统计等, 单独调传感器时用
 
 排版约定 (屏幕 128x64, 左上角为原点)
     英文 : 用 MicroPython 内置的 8x8 字库, 每字符宽 8 像素
@@ -40,15 +41,17 @@ ST_FAULT = "FAULT"      # 在线但读不到数据
 # 页面
 # --------------------------------------------------------------------------
 PAGE_MAIN = 0
-PAGE_INFO = 1
-PAGE_RAW = 2
-PAGE_COUNT = 3
+PAGE_MEAN = 1
+PAGE_INFO = 2
+PAGE_RAW = 3
+PAGE_COUNT = 4
 
 # --------------------------------------------------------------------------
 # 文案 (中文, 英文兜底)
 # --------------------------------------------------------------------------
 _TXT = {
     "title":    ("空气检测", "AIR CHECK"),
+    "mean":     ("均值", "MEAN"),
     "raw":      ("原始数据", "RAW DATA"),
     "uptime":   ("运行", "UP"),
     "probe":    ("自检中", "SCAN"),
@@ -318,7 +321,53 @@ class UI:
             # 警告级: 常亮 !; 不响蜂鸣器
             self.text("!", 120, y)
 
-    # ================= 第 2 页 运行信息 =================
+    # ================= 第 2 页 历史均值 =================
+    # 近 3 / 6 / 12 小时的平均值。数据来自 history.py: 每 5 分钟把这段时间
+    # 里的 1Hz 采样压成一个桶, 所以这一页的数值每 5 分钟才变一次。
+    #
+    # 版式(屏幕只有 16 个 ASCII 字符宽, 一个都不能浪费):
+    #     标签(1) 空格 3h(4) 空格 6h(4) 空格 12h(4)  = 16 字符 = 128 像素
+    # 数值列宽固定 4 个字符并右对齐, 但相邻列之间必须留 1 个空格,
+    # 否则 "0.04" 这种占满 4 格的值会和下一列粘成 "0.040.04"。
+    # 所以标签只能缩成 1 个字母: T=温度 H=湿度 F=甲醛 V=VOC 指数。
+    _MEAN_ROWS = (
+        ("sht40", "temp", "T", "%.1f"),
+        ("sht40", "rh", "H", "%.1f"),
+        ("ze08", "hcho", "F", "%.2f"),
+        ("sgp40", "voc", "V", "%d"),
+    )
+    _MEAN_FMT = "%s %4s %4s %4s"
+
+    @staticmethod
+    def _cell4(value, fmt):
+        """把一个均值格式化成最多 4 个字符(列宽固定, 多一个字符就会出屏)。"""
+        if value is None:
+            return "--"
+        s = fmt % value
+        if len(s) > 4:              # 例如 -12.3: 退化成整数, 不要挤掉后面的列
+            s = "%.0f" % value
+        return s
+
+    def show_mean(self, snap):
+        self.clear()
+        hist = snap.get("history") or {}
+        chans = snap["channels"]
+        self.ptext(T("mean"), 0, 0)
+        self._page_indicator(104)
+        self.text(self._MEAN_FMT % (" ", "3h", "6h", "12h"), 0, 16)
+        y = 24
+        for ch_key, key, label, fmt in self._MEAN_ROWS:
+            if not chans[ch_key].get("enabled", True):
+                continue
+            d = hist.get(key) or {}
+            cells = [self._cell4(d.get(win), fmt)
+                     for win in ("3h", "6h", "12h")]
+            self.text(self._MEAN_FMT % (label, cells[0], cells[1], cells[2]),
+                      0, y)
+            y += 8
+        self.flush()
+
+    # ================= 第 3 页 运行信息 =================
     # 这一页是诊断用的, 行距只有 8 像素, 放不下 16 像素高的汉字,
     # 所以状态用英文缩写表示。主界面不再显示这些状态, 判断连接情况看这里。
     _STATE_EN = {
@@ -359,7 +408,7 @@ class UI:
         self.text(("I2C %s" % snap["info"].get("scan", ""))[:16], 0, y)
         self.flush()
 
-    # ================= 第 3 页 原始数据 =================
+    # ================= 第 4 页 原始数据 =================
     def show_raw(self, snap):
         self.clear()
         self.ptext_center(T("raw"), 0)
@@ -381,6 +430,8 @@ class UI:
     def render(self, snap):
         if self.page == PAGE_MAIN:
             self.show_main(snap)
+        elif self.page == PAGE_MEAN:
+            self.show_mean(snap)
         elif self.page == PAGE_INFO:
             self.show_info(snap)
         else:

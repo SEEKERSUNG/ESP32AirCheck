@@ -55,7 +55,7 @@ def chan(state, warm_left=0, learning=False, enabled=True):
 
 
 def snapshot(states, values, alarm=None, warn=None, uptime=12 * 60 + 34,
-             oled_ok=True):
+             oled_ok=True, history=None):
     en = {"sht40": cfg.SHT40_ENABLED, "sgp40": cfg.SGP40_ENABLED,
           "ze08": cfg.ZE08_ENABLED}
     channels = {}
@@ -73,6 +73,7 @@ def snapshot(states, values, alarm=None, warn=None, uptime=12 * 60 + 34,
         "oled_addr": cfg.OLED_ADDR,
         "channels": channels,
         "values": values,
+        "history": MEAN if history is None else history,
         "alarm": a,
         "warn": w,
         "info": {"voc_raw": 32145, "voc_learning": True, "voc_uptime": 120,
@@ -83,6 +84,14 @@ def snapshot(states, values, alarm=None, warn=None, uptime=12 * 60 + 34,
 
 FULL = {"temp": 25.4, "rh": 48.2, "hcho_ppb": 32, "hcho_mg": 0.04,
         "tvoc": 123}
+
+# 历史均值页的假数据(真实数据由 history.py 每 5 分钟算一次)
+MEAN = {
+    "temp": {"3h": 25.1, "6h": 25.0, "12h": 24.8},
+    "rh": {"3h": 48.2, "6h": 47.9, "12h": 47.5},
+    "hcho": {"3h": 0.04, "6h": 0.041, "12h": 0.038},
+    "voc": {"3h": 105, "6h": 110, "12h": 108},
+}
 
 oled = FakeOLED(cfg.OLED_WIDTH, cfg.OLED_HEIGHT)
 u = ui.UI(oled, cfg.VERSION)
@@ -136,19 +145,42 @@ u.show_main(s)
 dump(oled, "第 1 页 主界面 - 甲醛通道关闭时不占版面")
 
 # ---------------------------------------------------------------- 第 2 页
+u.page = ui.PAGE_MEAN
+u.show_mean(snapshot({}, FULL))
+dump(oled, "第 2 页 历史均值 - 全部就绪")
+
+# 刚开机还没攒够数据: 三列都是 --
+u.show_mean(snapshot({}, FULL, history={}))
+dump(oled, "第 2 页 历史均值 - 还没有历史数据")
+
+# 只有部分窗口有数据(例如刚跑满 3 小时)
+part = {"temp": {"3h": 25.1, "6h": None, "12h": None},
+        "rh": {"3h": 48.2, "6h": None, "12h": None},
+        "hcho": {"3h": 0.04, "6h": None, "12h": None},
+        "voc": {"3h": 105, "6h": None, "12h": None}}
+u.show_mean(snapshot({}, FULL, history=part))
+dump(oled, "第 2 页 历史均值 - 只有 3 小时窗口")
+
+# 甲醛通道关掉后整行不画, 剩下的行往上收
+s = snapshot({}, FULL)
+s["channels"]["ze08"]["enabled"] = False
+u.show_mean(s)
+dump(oled, "第 2 页 历史均值 - 甲醛通道关闭时不占版面")
+
+# ---------------------------------------------------------------- 第 3 页
 s = snapshot({"ze08": ui.ST_FAULT}, FULL)
 u.page = ui.PAGE_INFO
 u.show_info(s)
-dump(oled, "第 2 页 运行信息")
+dump(oled, "第 3 页 运行信息")
 
 # ---- 超过 99 小时: 运行时间退化成 H:MM, 不能压到右上角页码 ----
 u.show_info(snapshot({}, FULL, uptime=100 * 3600 + 12 * 60 + 34))
-dump(oled, "第 2 页 - 运行超过 99 小时")
+dump(oled, "第 3 页 - 运行超过 99 小时")
 
-# ---------------------------------------------------------------- 第 3 页
+# ---------------------------------------------------------------- 第 4 页
 u.page = ui.PAGE_RAW
 u.show_raw(s)
-dump(oled, "第 3 页 原始数据")
+dump(oled, "第 4 页 原始数据")
 
 # ---------------------------------------------------------------- 息屏/唤醒
 off_ok = u.screen_off()

@@ -25,6 +25,10 @@
   5. VOC 基线持久化
      每 VOC_STATE_SAVE_MS 把 voc.VocAlgorithm 的状态存入 ESP32 NVS;
      SGP40 连接时恢复, 避免每次断电都从零学习。SGP40 本身不保存基线。
+
+  6. 历史均值
+     把 1Hz 读数按 5 分钟一个桶压进 history.History, 供第 2 页显示
+     近 3 / 6 / 12 小时的平均值; 桶数据同样可以跨断电保留。
 """
 
 from time import ticks_ms, ticks_diff, sleep_us
@@ -43,6 +47,7 @@ import sht40
 import sgp40
 import ze08
 import voc
+import history
 
 from ui import ST_PROBE, ST_ABSENT, ST_WARMUP, ST_READY, ST_FAULT
 
@@ -248,6 +253,11 @@ class SensorManager:
             "voc_raw": 0, "voc_learning": False, "voc_uptime": 0,
             "ze08_frames": 0, "ze08_bad": 0, "scan": "",
         }
+
+        # 历史均值(近 3 / 6 / 12 小时)。有保存过就恢复, 否则从空开始累积。
+        self.history = history.History()
+        if self.history.persist and self.history.load():
+            print("[hist] 已恢复历史均值数据")
 
         # 驱动实例
         self.drv_sht = None
@@ -588,6 +598,22 @@ class SensorManager:
             print("[voc] 基线已保存 (%d 字节)" % len(blob))
         return True
 
+    # ==================== 历史均值 ====================
+    def step_history(self, now=None):
+        """把当前读数喂给历史均值。由 1Hz 的 I2C 采集任务调用。
+
+        只有预热完成的通道才采样: ZE08 前 3 分钟的读数没有参考价值,
+        把它算进均值等于往 3 小时窗口里掺脏数据。
+        """
+        if now is None:
+            now = ticks_ms()
+        sht_ok = self.ch["sht40"].state == ST_READY
+        ze_ok = self.ch["ze08"].state == ST_READY
+        sgp_ok = self.ch["sgp40"].state == ST_READY
+        ready = {"temp": sht_ok, "rh": sht_ok,
+                 "hcho": ze_ok, "voc": sgp_ok}
+        self.history.tick(now, self.values, ready)
+
     # ==================== 报警判定 ====================
     def _eval_alarm(self):
         v = self.values
@@ -630,6 +656,7 @@ class SensorManager:
             "oled_addr": cfg.OLED_ADDR,
             "channels": chans,
             "values": self.values,
+            "history": self.history.averages(),
             "alarm": self.alarm,
             "warn": self.warn,
             "info": self.info,

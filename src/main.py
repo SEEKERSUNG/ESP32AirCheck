@@ -10,7 +10,7 @@ ESP32 空气质量检测仪 —— 主程序
          - 预热中的传感器显示"预热中 + 倒计时", 不参与报警判定
          - 未连接的传感器显示"未连接", 每 10 秒自动重找一次(支持热插拔)
          - 能正常读数的传感器照常显示数值
-    5. 按键(GPIO0, 板载 BOOT 键)切换 主界面 / 运行信息 / 原始数据 三页
+    5. 按键(GPIO0, 板载 BOOT 键)切换 主界面 / 历史均值 / 运行信息 / 原始数据 四页
     6. 10 秒无按键操作自动熄屏, 按 BOOT 键唤醒(唤醒那次不翻页)
 
 所有任务都在 asyncio 里跑, 采集不阻塞屏幕刷新。
@@ -214,6 +214,8 @@ class App:
                     self.mgr.last_scan = now
                 self.mgr._step_sht40(now)
                 self.mgr._step_sgp40(now)
+                # 顺带喂一次历史均值: 和历史数据一样是 1Hz, 不必单开任务
+                self.mgr.step_history(now)
             except Exception as e:
                 log("[i2c] 任务异常:", type(e).__name__, e)
             spent = ticks_diff(ticks_ms(), t0)
@@ -242,7 +244,7 @@ class App:
                 if self._screen_on:
                     try:
                         # 开机直接进主界面: 主界面只显示读数,
-                        # 连接/预热/异常状态统一看第 2 页。
+                        # 连接/预热/异常状态统一看运行信息页(第 3 页)。
                         self.view.render(self.mgr.snapshot())
                         self._ui_fails = 0
                     except Exception as e:
